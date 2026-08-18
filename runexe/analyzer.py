@@ -43,10 +43,103 @@ def rva_to_file_offset(
     return None
 
 
+def parse_import_functions(
+    file,
+    thunk_rva: int,
+    sections: list[PESection],
+    pe_format: str,
+) -> list[str]:
+    """Parse imported function names from an Import Lookup Table."""
+
+    thunk_offset = rva_to_file_offset(
+        thunk_rva,
+        sections,
+    )
+
+    if thunk_offset is None:
+        return []
+
+    functions = []
+
+    if pe_format == "PE32+ (64-bit)":
+        thunk_size = 8
+        unpack_format = "<Q"
+        ordinal_flag = 0x8000000000000000
+    else:
+        thunk_size = 4
+        unpack_format = "<I"
+        ordinal_flag = 0x80000000
+
+    current_offset = thunk_offset
+
+    while True:
+        file.seek(current_offset)
+
+        thunk_bytes = file.read(thunk_size)
+
+        if len(thunk_bytes) != thunk_size:
+            break
+
+        thunk_value = struct.unpack(
+            unpack_format,
+            thunk_bytes,
+        )[0]
+
+        # A zero entry marks the end of the table.
+        if thunk_value == 0:
+            break
+
+        # Imported by ordinal instead of by name.
+        if thunk_value & ordinal_flag:
+            ordinal = thunk_value & ~ordinal_flag
+            functions.append(f"Ordinal #{ordinal}")
+
+        else:
+            # The thunk points to an IMAGE_IMPORT_BY_NAME structure.
+            name_offset = rva_to_file_offset(
+                thunk_value,
+                sections,
+            )
+
+            if name_offset is not None:
+                file.seek(name_offset)
+
+                # First 2 bytes are the hint.
+                hint_bytes = file.read(2)
+
+                if len(hint_bytes) != 2:
+                    current_offset += thunk_size
+                    continue
+
+                name_bytes = bytearray()
+
+                # Safety limit.
+                for _ in range(512):
+                    byte = file.read(1)
+
+                    if not byte or byte == b"\x00":
+                        break
+
+                    name_bytes.extend(byte)
+
+                if name_bytes:
+                    function_name = name_bytes.decode(
+                        "ascii",
+                        errors="replace",
+                    )
+
+                    functions.append(function_name)
+
+        current_offset += thunk_size
+
+    return functions
+
+
 def parse_imports(
     file,
     import_rva: int,
     sections: list[PESection],
+    pe_format: str,
 ) -> list[PEImport]:
     """Parse the PE import directory and return imported DLLs."""
 
@@ -118,8 +211,21 @@ def parse_imports(
                     errors="replace",
                 )
 
+                functions = []
+
+                if original_first_thunk != 0:
+                    functions = parse_import_functions(
+                        file,
+                        original_first_thunk,
+                        sections,
+                        pe_format,
+                    )
+
                 imports.append(
-                    PEImport(name=name)
+                    PEImport(
+                        name=name, 
+                        functions=functions
+                    )
                 )
 
         # Move to the next IMAGE_IMPORT_DESCRIPTOR.
@@ -404,6 +510,8 @@ def analyze_executable(file_path: str) -> ExecutableInfo:
         )
 
         # ---------------------------------------------------------
+        # IMPORTS
+        # ---------------------------------------------------------
 
         import_directory = data_directories[1]
 
@@ -417,6 +525,7 @@ def analyze_executable(file_path: str) -> ExecutableInfo:
                 file,
                 import_directory.virtual_address,
                 sections,
+                pe_format,
             )
 
     return ExecutableInfo(

@@ -44,7 +44,8 @@ def analyze(file: str):
 
             for imported in result.imports:
                 typer.echo(f"  {imported.name}")
-
+                for function in imported.functions:
+                    typer.echo(f"    {function}")
     except FileNotFoundError as error:
         typer.echo(f"Error: {error}")
         raise typer.Exit(code=1)

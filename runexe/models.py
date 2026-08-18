@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -20,6 +20,7 @@ class PESection:
 @dataclass
 class PEImport:
     name: str
+    functions: list[str] = field(default_factory=list)
 
 
 @dataclass
