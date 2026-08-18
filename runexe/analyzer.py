@@ -2,37 +2,12 @@ from dataclasses import dataclass
 from pathlib import Path
 import struct
 
+from .models import (
+    ExecutableInfo,
+    PEDataDirectory,
+    PEImport,
+    PESection,)
 
-@dataclass
-class PEDataDirectory:
-    virtual_address: int
-    size: int
-
-
-@dataclass
-class PESection:
-    name: str
-    virtual_size: int
-    virtual_address: int
-    raw_size: int
-    raw_offset: int
-
-
-@dataclass
-class ExecutableInfo:
-    path: Path
-    valid: bool
-    format: str | None = None
-    architecture: str | None = None
-    reason: str | None = None
-    sections: list[PESection] | None = None
-    data_directories: list[PEDataDirectory] | None = None
-    imports: list[PEImport] | None = None
-
-
-@dataclass
-class PEImport:
-    name: str
 
 
 MACHINE_TYPES = {
@@ -152,6 +127,92 @@ def parse_imports(
 
     return imports
 
+
+def parse_sections(
+    file,
+    section_table_start: int,
+    number_of_sections: int,
+) -> list[PESection]:
+    file.seek(section_table_start)
+
+    sections = []
+
+    for _ in range(number_of_sections):
+        section_header = file.read(40)
+
+        if len(section_header) != 40:
+            raise ValueError("Incomplete PE section header")
+
+        name = section_header[0:8].rstrip(
+            b"\x00"
+        ).decode(
+            "ascii",
+            errors="replace",
+        )
+
+        virtual_size = struct.unpack(
+            "<I",
+            section_header[8:12],
+        )[0]
+
+        virtual_address = struct.unpack(
+            "<I",
+            section_header[12:16],
+        )[0]
+
+        raw_size = struct.unpack(
+            "<I",
+            section_header[16:20],
+        )[0]
+
+        raw_offset = struct.unpack(
+            "<I",
+            section_header[20:24],
+        )[0]
+
+        sections.append(
+            PESection(
+                name=name,
+                virtual_size=virtual_size,
+                virtual_address=virtual_address,
+                raw_size=raw_size,
+                raw_offset=raw_offset,
+            )
+        )
+
+    return sections
+
+
+def parse_data_directories(
+    file,
+    data_directory_start: int,
+) -> list[PEDataDirectory]:
+    file.seek(data_directory_start)
+
+    data_directories = []
+
+    for _ in range(16):
+        directory_bytes = file.read(8)
+
+        if len(directory_bytes) != 8:
+            return ExecutableInfo(
+                path=path,
+                valid=False,
+                reason="Incomplete PE data directory",
+            )
+
+        virtual_address, size = struct.unpack(
+            "<II",
+            directory_bytes,
+        )
+
+        data_directories.append(
+            PEDataDirectory(
+                virtual_address=virtual_address,
+                size=size,
+            )
+        )
+    return data_directories
 
 def analyze_executable(file_path: str) -> ExecutableInfo:
     path = Path(file_path)
@@ -322,31 +383,10 @@ def analyze_executable(file_path: str) -> ExecutableInfo:
             + data_directory_offset
         )
 
-        file.seek(data_directory_start)
-
-        data_directories = []
-
-        for _ in range(16):
-            directory_bytes = file.read(8)
-
-            if len(directory_bytes) != 8:
-                return ExecutableInfo(
-                    path=path,
-                    valid=False,
-                    reason="Incomplete PE data directory",
-                )
-
-            virtual_address, size = struct.unpack(
-                "<II",
-                directory_bytes,
-            )
-
-            data_directories.append(
-                PEDataDirectory(
-                    virtual_address=virtual_address,
-                    size=size,
-                )
-            )
+        data_directories = parse_data_directories(
+            file,
+            data_directory_start,
+        )
 
         # ---------------------------------------------------------
         # SECTION TABLE
@@ -357,57 +397,13 @@ def analyze_executable(file_path: str) -> ExecutableInfo:
             + optional_header_size
         )
 
-        file.seek(section_table_start)
+        sections = parse_sections(
+            file,
+            section_table_start,
+            number_of_sections,
+        )
 
-        sections = []
-
-        for _ in range(number_of_sections):
-
-            section_header = file.read(40)
-
-            if len(section_header) != 40:
-                return ExecutableInfo(
-                    path=path,
-                    valid=False,
-                    reason="Incomplete PE section header",
-                )
-
-            name = section_header[0:8].rstrip(
-                b"\x00"
-            ).decode(
-                "ascii",
-                errors="replace",
-            )
-
-            virtual_size = struct.unpack(
-                "<I",
-                section_header[8:12],
-            )[0]
-
-            virtual_address = struct.unpack(
-                "<I",
-                section_header[12:16],
-            )[0]
-
-            raw_size = struct.unpack(
-                "<I",
-                section_header[16:20],
-            )[0]
-
-            raw_offset = struct.unpack(
-                "<I",
-                section_header[20:24],
-            )[0]
-
-            sections.append(
-                PESection(
-                    name=name,
-                    virtual_size=virtual_size,
-                    virtual_address=virtual_address,
-                    raw_size=raw_size,
-                    raw_offset=raw_offset,
-                )
-            )
+        # ---------------------------------------------------------
 
         import_directory = data_directories[1]
 
