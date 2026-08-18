@@ -11,7 +11,15 @@ app = typer.Typer(
 
 
 @app.command()
-def analyze(file: str):
+def analyze(
+    file: str,
+    imports: bool = typer.Option(
+        False,
+        "--imports",
+        "-i",
+        help="Show every imported function for each DLL, not just counts.",
+    ),
+):
     """Analyze a Windows executable."""
 
     try:
@@ -42,10 +50,24 @@ def analyze(file: str):
             typer.echo("")
             typer.echo("Imports:")
 
-            for imported in result.imports:
-                typer.echo(f"  {imported.name}")
-                for function in imported.functions:
-                    typer.echo(f"    {function}")
+            if imports:
+                for imported in result.imports:
+                    typer.echo(f"  {imported.name}")
+                    for function in imported.functions:
+                        typer.echo(f"    {function}")
+            else:
+                for imported in result.imports:
+                    function_count = len(imported.functions)
+                    unit = "function" if function_count == 1 else "functions"
+                    typer.echo(
+                        f"  {imported.name:<24} "
+                        f"({function_count} {unit})"
+                    )
+
+                typer.echo("")
+                typer.echo(
+                    "(use --imports/-i to list every imported function)"
+                )
     except FileNotFoundError as error:
         typer.echo(f"Error: {error}")
         raise typer.Exit(code=1)

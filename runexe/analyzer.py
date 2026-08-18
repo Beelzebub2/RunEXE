@@ -301,11 +301,7 @@ def parse_data_directories(
         directory_bytes = file.read(8)
 
         if len(directory_bytes) != 8:
-            return ExecutableInfo(
-                path=path,
-                valid=False,
-                reason="Incomplete PE data directory",
-            )
+            raise ValueError("Incomplete PE data directory")
 
         virtual_address, size = struct.unpack(
             "<II",
@@ -489,25 +485,32 @@ def analyze_executable(file_path: str) -> ExecutableInfo:
             + data_directory_offset
         )
 
-        data_directories = parse_data_directories(
-            file,
-            data_directory_start,
-        )
-
-        # ---------------------------------------------------------
-        # SECTION TABLE
-        # ---------------------------------------------------------
-
         section_table_start = (
             optional_header_start
             + optional_header_size
         )
 
-        sections = parse_sections(
-            file,
-            section_table_start,
-            number_of_sections,
-        )
+        try:
+            data_directories = parse_data_directories(
+                file,
+                data_directory_start,
+            )
+
+            # ---------------------------------------------------------
+            # SECTION TABLE
+            # ---------------------------------------------------------
+
+            sections = parse_sections(
+                file,
+                section_table_start,
+                number_of_sections,
+            )
+        except ValueError as error:
+            return ExecutableInfo(
+                path=path,
+                valid=False,
+                reason=str(error),
+            )
 
         # ---------------------------------------------------------
         # IMPORTS
