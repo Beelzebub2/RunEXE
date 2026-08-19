@@ -33,3 +33,11 @@ class ExecutableInfo:
     sections: list[PESection] | None = None
     data_directories: list[PEDataDirectory] | None = None
     imports: list[PEImport] | None = None
+
+
+@dataclass
+class CompatibilityReport:
+    application_type: str
+    recommended_runtime: str
+    architecture: str
+    notes: list[str] = field(default_factory=list)

@@ -1,6 +1,7 @@
 import typer
 
 from runexe.analyzer import analyze_executable, rva_to_file_offset
+from runexe.compatibility import analyze_compatibility
 
 
 app = typer.Typer(
@@ -68,6 +69,35 @@ def analyze(
                 typer.echo(
                     "(use --imports/-i to list every imported function)"
                 )
+
+        # Analyze compatibility.
+        compatibility = analyze_compatibility(result)
+
+        typer.echo("")
+        typer.echo("Compatibility:")
+
+        typer.echo(
+            f"  Application type: "
+            f"{compatibility.application_type}"
+        )
+
+        typer.echo(
+            f"  Recommended runtime: "
+            f"{compatibility.recommended_runtime}"
+        )
+
+        typer.echo(
+            f"  Architecture: "
+            f"{compatibility.architecture}"
+        )
+
+        if compatibility.notes:
+            typer.echo("")
+            typer.echo("Notes:")
+
+            for note in compatibility.notes:
+                typer.echo(f"  - {note}")
+
     except FileNotFoundError as error:
         typer.echo(f"Error: {error}")
         raise typer.Exit(code=1)
