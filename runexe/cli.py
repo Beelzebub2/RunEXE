@@ -1,6 +1,6 @@
 import typer
 
-from runexe.analyzer import analyze_executable, rva_to_file_offset
+from runexe.analyzer import analyze_executable
 from runexe.compatibility import analyze_compatibility
 
 

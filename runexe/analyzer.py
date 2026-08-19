@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from pathlib import Path
 import struct
 
@@ -7,7 +6,8 @@ from .models import (
     PEDataDirectory,
     PEImport,
     PESection,)
-
+from .constants import (
+    IMAGE_DIRECTORY_ENTRY_IMPORT,)
 
 
 MACHINE_TYPES = {
@@ -242,6 +242,11 @@ def parse_sections(
     file.seek(section_table_start)
 
     sections = []
+
+    if number_of_sections > 96:
+        raise ValueError(
+            "Unrealistic number of sections in PE header"
+        )
 
     for _ in range(number_of_sections):
         section_header = file.read(40)
@@ -516,7 +521,7 @@ def analyze_executable(file_path: str) -> ExecutableInfo:
         # IMPORTS
         # ---------------------------------------------------------
 
-        import_directory = data_directories[1]
+        import_directory = data_directories[IMAGE_DIRECTORY_ENTRY_IMPORT]
 
         imports = []
 
