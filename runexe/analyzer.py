@@ -7,7 +7,11 @@ from .models import (
     PEImport,
     PESection,)
 from .constants import (
-    IMAGE_DIRECTORY_ENTRY_IMPORT,)
+    IMAGE_DIRECTORY_ENTRY_IMPORT,
+    IMAGE_DIRECTORY_ENTRY_RESOURCE,
+    SUBSYSTEM_TYPES,)
+from .pe_utils import rva_to_file_offset
+from .resources import extract_manifest, extract_version_info
 
 
 MACHINE_TYPES = {
@@ -21,26 +25,6 @@ PE_FORMATS = {
     0x10B: "PE32 (32-bit)",
     0x20B: "PE32+ (64-bit)",
 }
-
-
-def rva_to_file_offset(
-    rva: int,
-    sections: list[PESection],
-) -> int | None:
-    """Convert a PE relative virtual address to a file offset."""
-
-    for section in sections:
-        section_start = section.virtual_address
-        section_end = section_start + max(
-            section.virtual_size,
-            section.raw_size,
-        )
-
-        if section_start <= rva < section_end:
-            offset_inside_section = rva - section_start
-            return section.raw_offset + offset_inside_section
-
-    return None
 
 
 def parse_import_functions(
@@ -482,6 +466,31 @@ def analyze_executable(file_path: str) -> ExecutableInfo:
             )
 
         # ---------------------------------------------------------
+        # SUBSYSTEM
+        # ---------------------------------------------------------
+
+        # Subsystem sits at the same offset (68) in both the PE32 and
+        # PE32+ optional headers: PE32+'s ImageBase grows from 4 to 8
+        # bytes but drops the 4-byte BaseOfData field that PE32 has,
+        # so every field from SectionAlignment onward lines up.
+        file.seek(optional_header_start + 68)
+
+        subsystem_bytes = file.read(2)
+
+        if len(subsystem_bytes) == 2:
+            subsystem_value = struct.unpack(
+                "<H",
+                subsystem_bytes,
+            )[0]
+
+            subsystem = SUBSYSTEM_TYPES.get(
+                subsystem_value,
+                f"Unknown (0x{subsystem_value:04X})",
+            )
+        else:
+            subsystem = None
+
+        # ---------------------------------------------------------
         # DATA DIRECTORIES
         # ---------------------------------------------------------
 
@@ -536,12 +545,42 @@ def analyze_executable(file_path: str) -> ExecutableInfo:
                 pe_format,
             )
 
+        # ---------------------------------------------------------
+        # RESOURCES (manifest + version info)
+        # ---------------------------------------------------------
+
+        manifest = None
+        version_info = None
+
+        resource_directory = data_directories[
+            IMAGE_DIRECTORY_ENTRY_RESOURCE
+        ]
+
+        if (
+            resource_directory.virtual_address != 0
+            and resource_directory.size != 0
+        ):
+            manifest = extract_manifest(
+                file,
+                sections,
+                resource_directory.virtual_address,
+            )
+
+            version_info = extract_version_info(
+                file,
+                sections,
+                resource_directory.virtual_address,
+            )
+
     return ExecutableInfo(
         path=path,
         valid=True,
         format=pe_format,
         architecture=architecture,
+        subsystem=subsystem,
         sections=sections,
         data_directories=data_directories,
         imports=imports,
+        manifest=manifest,
+        version_info=version_info,
     )

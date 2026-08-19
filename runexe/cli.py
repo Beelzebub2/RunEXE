@@ -2,6 +2,7 @@ import typer
 
 from runexe.analyzer import analyze_executable
 from runexe.compatibility import analyze_compatibility
+from runexe.resources import extract_requested_execution_level
 
 
 app = typer.Typer(
@@ -35,6 +36,37 @@ def analyze(
 
         typer.echo(f"Format: {result.format}")
         typer.echo(f"Architecture: {result.architecture}")
+
+        if result.subsystem:
+            typer.echo(f"Subsystem: {result.subsystem}")
+
+        if result.version_info:
+            product_name = result.version_info.strings.get("ProductName")
+            company_name = result.version_info.strings.get("CompanyName")
+
+            if product_name:
+                typer.echo(f"Product: {product_name}")
+
+            if company_name:
+                typer.echo(f"Publisher: {company_name}")
+
+            if result.version_info.product_version:
+                typer.echo(
+                    f"Version: {result.version_info.product_version}"
+                )
+
+        if result.manifest:
+            execution_level = extract_requested_execution_level(
+                result.manifest
+            )
+
+            manifest_line = "Manifest: Present"
+
+            if execution_level:
+                manifest_line += f" (execution level: {execution_level})"
+
+            typer.echo(manifest_line)
+
         if result.sections:
             typer.echo("")
             typer.echo("Sections:")
@@ -82,6 +114,11 @@ def analyze(
         )
 
         typer.echo(
+            f"  Category: "
+            f"{compatibility.category}"
+        )
+
+        typer.echo(
             f"  Recommended runtime: "
             f"{compatibility.recommended_runtime}"
         )
@@ -90,6 +127,23 @@ def analyze(
             f"  Architecture: "
             f"{compatibility.architecture}"
         )
+
+        typer.echo(
+            f"  WINEARCH: "
+            f"{compatibility.wine_arch or 'N/A'}"
+        )
+
+        typer.echo(
+            f"  Supported: "
+            f"{'Yes' if compatibility.supported else 'No'}"
+        )
+
+        if compatibility.blocking_issues:
+            typer.echo("")
+            typer.echo("⚠ Blocking issues:")
+
+            for issue in compatibility.blocking_issues:
+                typer.echo(f"  - {issue}")
 
         if compatibility.notes:
             typer.echo("")

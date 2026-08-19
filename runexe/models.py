@@ -24,20 +24,45 @@ class PEImport:
 
 
 @dataclass
+class VersionInfo:
+    """Parsed VS_VERSIONINFO resource (RT_VERSION)."""
+
+    file_version: str | None = None
+    product_version: str | None = None
+    # Raw StringTable key/value pairs, e.g. "ProductName", "CompanyName",
+    # "FileDescription".
+    strings: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class ExecutableInfo:
     path: Path
     valid: bool
     format: str | None = None
     architecture: str | None = None
+    subsystem: str | None = None
     reason: str | None = None
     sections: list[PESection] | None = None
     data_directories: list[PEDataDirectory] | None = None
     imports: list[PEImport] | None = None
+    manifest: str | None = None
+    version_info: VersionInfo | None = None
 
 
 @dataclass
 class CompatibilityReport:
     application_type: str
-    recommended_runtime: str
     architecture: str
+    # "game" or "application" - drives the Wine vs. Proton recommendation.
+    category: str
+    # "wine", "proton", or "unsupported".
+    backend: str
+    # Human-readable version of `backend`, e.g. "Proton (Steam Play)".
+    recommended_runtime: str
+    wine_arch: str | None = None
+    supported: bool = True
+    # Detected reasons the app is unlikely to run at all regardless of
+    # backend (e.g. kernel-level anti-cheat), separate from `notes`
+    # so callers can act on this without parsing free text.
+    blocking_issues: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
