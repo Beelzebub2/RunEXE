@@ -58,10 +58,15 @@ STEAM_API_DLLS = {
     "steam_api64.dll",
 }
 
-# DLLs commonly used by games (graphics/input middleware) but rare in
-# ordinary desktop applications. Any one of these is a moderate signal;
-# it's weaker than a Steam API import, so it's only used when no Steam
-# API import is present.
+# DLLs commonly used by games (graphics/input middleware, or a game
+# engine's runtime) but rare in ordinary desktop applications. Any one
+# of these is a moderate signal; it's weaker than a Steam API import,
+# so it's only used when no Steam API import is present.
+#
+# UnityPlayer.dll indicates the Unity engine was used, which is heavily
+# game-dominated but also used for some non-game interactive software
+# (visualization tools, simulators, etc.), so it belongs here as a
+# moderate signal rather than as its own hard "this is a game" rule.
 GAME_SIGNAL_DLLS = {
     "d3d9.dll",
     "d3d10.dll",
@@ -75,4 +80,5 @@ GAME_SIGNAL_DLLS = {
     "xinput1_4.dll",
     "xinput9_1_0.dll",
     "xaudio2_9.dll",
+    "unityplayer.dll",
 }

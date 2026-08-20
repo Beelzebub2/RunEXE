@@ -3,6 +3,7 @@ import typer
 from runexe.analyzer import analyze_executable
 from runexe.compatibility import analyze_compatibility
 from runexe.resources import extract_requested_execution_level
+from runexe.runner import LaunchResult, RunnerError, launch
 
 
 app = typer.Typer(
@@ -145,6 +146,13 @@ def analyze(
             for issue in compatibility.blocking_issues:
                 typer.echo(f"  - {issue}")
 
+        if compatibility.required_verbs:
+            typer.echo("")
+            typer.echo("Recommended fixes:")
+            typer.echo(
+                "  winetricks " + " ".join(compatibility.required_verbs)
+            )
+
         if compatibility.notes:
             typer.echo("")
             typer.echo("Notes:")
@@ -154,6 +162,73 @@ def analyze(
 
     except FileNotFoundError as error:
         typer.echo(f"Error: {error}")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def run(
+    file: str,
+    timeout: int = typer.Option(
+        None,
+        "--timeout",
+        help="Seconds to wait before giving up on the launched process.",
+    ),
+):
+    """Analyze, provision a prefix, and run a Windows executable."""
+
+    try:
+        result = analyze_executable(file)
+
+        if not result.valid:
+            typer.echo(f"Error: {result.reason}")
+            raise typer.Exit(code=1)
+
+        compatibility = analyze_compatibility(result)
+
+        typer.echo(
+            f"Launching {result.path.name} "
+            f"({compatibility.recommended_runtime})..."
+        )
+
+        if compatibility.required_verbs:
+            typer.echo(
+                "Installing dependencies: "
+                + ", ".join(compatibility.required_verbs)
+            )
+
+        launch_result: LaunchResult = launch(
+            result,
+            compatibility,
+            timeout=timeout,
+        )
+
+        if launch_result.timed_out:
+            typer.echo(
+                f"Timed out after {timeout}s; the process may still "
+                f"be running."
+            )
+            raise typer.Exit(code=1)
+
+        if launch_result.exit_code != 0:
+            typer.echo(f"Exited with code {launch_result.exit_code}.")
+
+            if launch_result.stderr.strip():
+                typer.echo("")
+                typer.echo("stderr:")
+                typer.echo(launch_result.stderr.strip())
+
+            raise typer.Exit(code=launch_result.exit_code or 1)
+
+        typer.echo("Exited normally.")
+
+    except FileNotFoundError as error:
+        typer.echo(f"Error: {error}")
+        raise typer.Exit(code=1)
+    except RunnerError as error:
+        typer.echo(f"Error: {error}")
+        raise typer.Exit(code=1)
+    except NotImplementedError as error:
+        typer.echo(f"Not yet supported: {error}")
         raise typer.Exit(code=1)
 
 

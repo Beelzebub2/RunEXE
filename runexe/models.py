@@ -66,3 +66,7 @@ class CompatibilityReport:
     # so callers can act on this without parsing free text.
     blocking_issues: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Winetricks verbs (e.g. "vcrun2015", "dotnet48") that should be
+    # installed into the prefix before launch, inferred from imports
+    # and the CLR header. See dependencies.py.
+    required_verbs: list[str] = field(default_factory=list)

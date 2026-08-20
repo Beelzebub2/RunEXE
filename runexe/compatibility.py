@@ -5,6 +5,7 @@ from runexe.constants import (
     STEAM_API_DLLS,
     WINE_ARCH_BY_ARCHITECTURE,
 )
+from runexe.dependencies import DOTNET_VERB, resolve_verbs_for_imports
 from runexe.models import (
     CompatibilityReport,
     ExecutableInfo,
@@ -65,6 +66,31 @@ def classify_application(executable: ExecutableInfo) -> str:
         return "game"
 
     return "application"
+
+
+def resolve_dependencies(
+    executable: ExecutableInfo,
+    is_dotnet: bool,
+) -> list[str]:
+    """Return the winetricks verbs that should be installed into the
+    prefix before launch, based on imported DLLs and the CLR header.
+
+    .NET is handled as its own branch rather than a table entry: it's
+    detected structurally (the CLR Runtime Header), not by an import
+    name, and it needs a different kind of remediation (a Framework
+    installer, or wine-mono) than a plain vcrun/d3dx verb.
+    """
+
+    imported_names = [
+        imported.name for imported in (executable.imports or [])
+    ]
+
+    verbs = resolve_verbs_for_imports(imported_names)
+
+    if is_dotnet and DOTNET_VERB not in verbs:
+        verbs.append(DOTNET_VERB)
+
+    return verbs
 
 
 def analyze_compatibility(
@@ -159,6 +185,10 @@ def analyze_compatibility(
     else:
         application_type = "Native Windows"
 
+    # Resolve winetricks verbs to pre-install before launch, based on
+    # imports and the .NET check above.
+    required_verbs = resolve_dependencies(executable, is_dotnet)
+
     # Note the subsystem (GUI apps vs. console apps behave differently
     # under Wine).
     if executable.subsystem == "Windows Console":
@@ -192,4 +222,5 @@ def analyze_compatibility(
         supported=supported,
         blocking_issues=blocking_issues,
         notes=notes,
+        required_verbs=required_verbs,
     )
