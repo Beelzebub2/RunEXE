@@ -40,14 +40,20 @@ class LaunchResult:
     timed_out: bool = False
 
 
+def _verbose(enabled: bool, message: str) -> None:
+    if enabled:
+        print(f"[runexe] {message}")
+
+
 def _require_binary(name: str) -> str:
     path = shutil.which(name)
-
     if path is None:
-        raise RunnerError(
-            f"'{name}' was not found on PATH. Install it and try again."
-        )
-
+        hints = {
+            "wine": "sudo apt install wine (Ubuntu/Debian) or sudo dnf install wine (Fedora)",
+            "winetricks": "sudo apt install winetricks (Ubuntu/Debian) or sudo dnf install winetricks (Fedora)",
+        }
+        hint = hints.get(name, f"Install {name} using your package manager")
+        raise RunnerError(f"'{name}' not found. {hint}")
     return path
 
 
@@ -80,73 +86,121 @@ def _wine_env(prefix: Path, wine_arch: str) -> dict:
     return env
 
 
-def ensure_prefix(prefix: Path, wine_arch: str) -> None:
-    """Create and boot the Wine prefix if it doesn't already exist.
-
-    Safe to call on every launch -- it's a no-op once the prefix
-    directory is already present.
-    """
+def ensure_prefix(
+    prefix: Path,
+    wine_arch: str,
+    verbose: bool = False,
+) -> None:
+    """Create and boot the Wine prefix if it doesn't already exist."""
 
     if prefix.exists():
+        _verbose(verbose, f"Reusing Wine prefix: {prefix}")
         return
 
     wine_binary = _require_binary("wine")
 
+    _verbose(verbose, f"Creating Wine prefix: {prefix}")
+    _verbose(verbose, f"WINEARCH={wine_arch}")
+    _verbose(verbose, "Initializing prefix with wineboot...")
+
     prefix.mkdir(parents=True, exist_ok=True)
 
     try:
-        subprocess.run(
+        completed = subprocess.run(
             [wine_binary, "wineboot", "--init"],
             env=_wine_env(prefix, wine_arch),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=PREFIX_INIT_TIMEOUT,
         )
+
+        if completed.returncode != 0:
+            raise RunnerError(
+                f"Wine prefix initialization failed with "
+                f"exit code {completed.returncode}."
+            )
+
+        _verbose(verbose, "Wine prefix initialized successfully.")
+
     except subprocess.TimeoutExpired as error:
         raise RunnerError(
             f"Timed out initializing the Wine prefix at {prefix}."
         ) from error
 
 
-def install_verbs(prefix: Path, verbs: list[str]) -> set[str]:
-    """Install the given winetricks verbs into `prefix`, skipping any
-    already recorded as installed for it.
-
-    Returns the full set of verbs now installed (previously-installed
-    plus newly-installed).
-    """
+def install_verbs(
+    prefix: Path,
+    verbs: list[str],
+    verbose: bool = False,
+) -> set[str]:
+    """Install the given winetricks verbs into prefix."""
 
     marker = _installed_verbs_marker(prefix)
+
     already_installed = (
-        set(marker.read_text().split()) if marker.exists() else set()
+        set(marker.read_text().split())
+        if marker.exists()
+        else set()
     )
 
-    to_install = [verb for verb in verbs if verb not in already_installed]
+    to_install = [
+        verb
+        for verb in verbs
+        if verb not in already_installed
+    ]
 
     if not to_install:
+        _verbose(
+            verbose,
+            "All required winetricks dependencies are already installed.",
+        )
         return already_installed
 
     winetricks_binary = _require_binary("winetricks")
+
+    _verbose(
+        verbose,
+        f"Installing winetricks verbs: {', '.join(to_install)}",
+    )
 
     env = os.environ.copy()
     env["WINEPREFIX"] = str(prefix)
     env.setdefault("WINEDEBUG", "-all")
 
+    command = [
+        winetricks_binary,
+        "--unattended",
+        *to_install,
+    ]
+
+    _verbose(verbose, f"Command: {' '.join(command)}")
+
     try:
-        subprocess.run(
-            [winetricks_binary, "--unattended", *to_install],
+        completed = subprocess.run(
+            command,
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=WINETRICKS_TIMEOUT,
         )
+
     except subprocess.TimeoutExpired as error:
         raise RunnerError(
-            f"Timed out installing winetricks verbs: {', '.join(to_install)}."
+            f"Timed out installing winetricks verbs: "
+            f"{', '.join(to_install)}."
         ) from error
 
+    if completed.returncode != 0:
+        raise RunnerError(
+            f"Winetricks failed with exit code "
+            f"{completed.returncode}."
+        )
+
     updated = already_installed | set(to_install)
+
     marker.write_text(" ".join(sorted(updated)))
+
+    _verbose(verbose, "Dependencies installed successfully.")
 
     return updated
 
@@ -156,14 +210,9 @@ def launch(
     compatibility: CompatibilityReport,
     extra_args: list[str] | None = None,
     timeout: int | None = None,
+    verbose: bool = False,
 ) -> LaunchResult:
-    """Provision the prefix (creating it and installing dependencies
-    as needed) and run the executable under Wine, capturing output.
-
-    Raises RunnerError for setup problems (unsupported architecture,
-    a detected anti-cheat blocker, a missing `wine`/`winetricks`
-    binary) rather than attempting a launch that can't succeed.
-    """
+    """Provision the prefix and run the executable under Wine."""
 
     if compatibility.backend == "unsupported":
         raise RunnerError(
@@ -184,18 +233,66 @@ def launch(
         )
 
     if not executable.path.exists():
-        raise RunnerError(f"Executable not found: {executable.path}")
+        raise RunnerError(
+            f"Executable not found: {executable.path}"
+        )
 
     wine_arch = compatibility.wine_arch or "win64"
     prefix = prefix_path_for(executable)
 
-    ensure_prefix(prefix, wine_arch)
+    _verbose(verbose, "Preparing launch...")
+    _verbose(
+        verbose,
+        f"Executable: {executable.path.resolve()}",
+    )
+    _verbose(
+        verbose,
+        f"Executable architecture: {compatibility.architecture}",
+    )
+    _verbose(
+        verbose,
+        f"Backend: {compatibility.backend}",
+    )
+    _verbose(
+        verbose,
+        f"Wine architecture: {wine_arch}",
+    )
+    _verbose(
+        verbose,
+        f"Wine prefix: {prefix}",
+    )
+
+    ensure_prefix(
+        prefix,
+        wine_arch,
+        verbose=verbose,
+    )
 
     if compatibility.required_verbs:
-        install_verbs(prefix, compatibility.required_verbs)
+        install_verbs(
+            prefix,
+            compatibility.required_verbs,
+            verbose=verbose,
+        )
 
     wine_binary = _require_binary("wine")
-    command = [wine_binary, str(executable.path), *(extra_args or [])]
+
+    command = [
+        wine_binary,
+        str(executable.path),
+        *(extra_args or []),
+    ]
+
+    _verbose(verbose, f"Wine binary: {wine_binary}")
+    _verbose(verbose, f"Command: {' '.join(command)}")
+
+    if timeout is not None:
+        _verbose(
+            verbose,
+            f"Launch timeout: {timeout} seconds",
+        )
+    else:
+        _verbose(verbose, "Launch timeout: none")
 
     try:
         completed = subprocess.run(
@@ -205,13 +302,21 @@ def launch(
             text=True,
             timeout=timeout,
         )
+
     except subprocess.TimeoutExpired as error:
+        _verbose(verbose, "Process timed out.")
+
         return LaunchResult(
             exit_code=None,
             stdout=error.stdout or "",
             stderr=error.stderr or "",
             timed_out=True,
         )
+
+    _verbose(
+        verbose,
+        f"Process exited with code {completed.returncode}",
+    )
 
     return LaunchResult(
         exit_code=completed.returncode,

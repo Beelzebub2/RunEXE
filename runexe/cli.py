@@ -173,6 +173,12 @@ def run(
         "--timeout",
         help="Seconds to wait before giving up on the launched process.",
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show more information about the launch process.",
+    ),
 ):
     """Analyze, provision a prefix, and run a Windows executable."""
 
@@ -190,6 +196,19 @@ def run(
             f"({compatibility.recommended_runtime})..."
         )
 
+        if verbose:
+            typer.echo("")
+            typer.echo("Launch details:")
+            typer.echo(f"  Executable architecture: {result.architecture}")
+            typer.echo(
+                f"  Recommended runtime: "
+                f"{compatibility.recommended_runtime}"
+            )
+            typer.echo(
+                f"  WINEARCH: "
+                f"{compatibility.wine_arch or 'N/A'}"
+            )
+
         if compatibility.required_verbs:
             typer.echo(
                 "Installing dependencies: "
@@ -200,6 +219,7 @@ def run(
             result,
             compatibility,
             timeout=timeout,
+            verbose=verbose,
         )
 
         if launch_result.timed_out:
@@ -217,16 +237,20 @@ def run(
                 typer.echo("stderr:")
                 typer.echo(launch_result.stderr.strip())
 
-            raise typer.Exit(code=launch_result.exit_code or 1)
+            raise typer.Exit(
+                code=launch_result.exit_code or 1
+            )
 
         typer.echo("Exited normally.")
 
     except FileNotFoundError as error:
         typer.echo(f"Error: {error}")
         raise typer.Exit(code=1)
+
     except RunnerError as error:
         typer.echo(f"Error: {error}")
         raise typer.Exit(code=1)
+
     except NotImplementedError as error:
         typer.echo(f"Not yet supported: {error}")
         raise typer.Exit(code=1)
