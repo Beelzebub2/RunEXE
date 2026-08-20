@@ -164,6 +164,10 @@ def analyze(
         typer.echo(f"Error: {error}")
         raise typer.Exit(code=1)
 
+    except ValueError as error:
+        typer.echo(f"Error: {error}")
+        raise typer.Exit(code=1)
+
 
 @app.command()
 def run(
@@ -253,6 +257,10 @@ def run(
 
     except NotImplementedError as error:
         typer.echo(f"Not yet supported: {error}")
+        raise typer.Exit(code=1)
+
+    except ValueError as error:
+        typer.echo(f"Error: {error}")
         raise typer.Exit(code=1)
 
 

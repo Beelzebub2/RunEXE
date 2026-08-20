@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .models import CompatibilityReport, ExecutableInfo
+from .pe_utils import run_with_progress
 
 
 RUNEXE_DATA_DIR = Path.home() / ".local" / "share" / "runexe"
@@ -94,38 +95,39 @@ def ensure_prefix(
     """Create and boot the Wine prefix if it doesn't already exist."""
 
     if prefix.exists():
-        _verbose(verbose, f"Reusing Wine prefix: {prefix}")
+        if verbose:
+            print(f"[runexe] Reusing Wine prefix: {prefix}")
         return
 
     wine_binary = _require_binary("wine")
 
-    _verbose(verbose, f"Creating Wine prefix: {prefix}")
-    _verbose(verbose, f"WINEARCH={wine_arch}")
-    _verbose(verbose, "Initializing prefix with wineboot...")
-
     prefix.mkdir(parents=True, exist_ok=True)
 
+    command = [
+        wine_binary,
+        "wineboot",
+        "--init",
+    ]
+
     try:
-        completed = subprocess.run(
-            [wine_binary, "wineboot", "--init"],
+        result = run_with_progress(
+            command,
             env=_wine_env(prefix, wine_arch),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            description="Creating Wine prefix",
             timeout=PREFIX_INIT_TIMEOUT,
+            verbose=verbose,
         )
-
-        if completed.returncode != 0:
-            raise RunnerError(
-                f"Wine prefix initialization failed with "
-                f"exit code {completed.returncode}."
-            )
-
-        _verbose(verbose, "Wine prefix initialized successfully.")
 
     except subprocess.TimeoutExpired as error:
         raise RunnerError(
             f"Timed out initializing the Wine prefix at {prefix}."
         ) from error
+
+    if result.returncode != 0:
+        raise RunnerError(
+            f"Wine prefix initialization failed with "
+            f"exit code {result.returncode}."
+        )
 
 
 def install_verbs(
@@ -133,7 +135,11 @@ def install_verbs(
     verbs: list[str],
     verbose: bool = False,
 ) -> set[str]:
-    """Install the given winetricks verbs into prefix."""
+    """Install the given winetricks verbs into prefix.
+
+    Skips verbs already recorded as installed.
+    Returns the full set of installed verbs.
+    """
 
     marker = _installed_verbs_marker(prefix)
 
@@ -150,18 +156,14 @@ def install_verbs(
     ]
 
     if not to_install:
-        _verbose(
-            verbose,
-            "All required winetricks dependencies are already installed.",
-        )
+        if verbose:
+            print(
+                "[runexe] Required dependencies are already installed."
+            )
+
         return already_installed
 
     winetricks_binary = _require_binary("winetricks")
-
-    _verbose(
-        verbose,
-        f"Installing winetricks verbs: {', '.join(to_install)}",
-    )
 
     env = os.environ.copy()
     env["WINEPREFIX"] = str(prefix)
@@ -173,15 +175,16 @@ def install_verbs(
         *to_install,
     ]
 
-    _verbose(verbose, f"Command: {' '.join(command)}")
-
     try:
-        completed = subprocess.run(
+        result = run_with_progress(
             command,
             env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            description=(
+                f"Installing dependencies: "
+                f"{', '.join(to_install)}"
+            ),
             timeout=WINETRICKS_TIMEOUT,
+            verbose=verbose,
         )
 
     except subprocess.TimeoutExpired as error:
@@ -190,17 +193,17 @@ def install_verbs(
             f"{', '.join(to_install)}."
         ) from error
 
-    if completed.returncode != 0:
+    if result.returncode != 0:
         raise RunnerError(
             f"Winetricks failed with exit code "
-            f"{completed.returncode}."
+            f"{result.returncode}."
         )
 
     updated = already_installed | set(to_install)
 
-    marker.write_text(" ".join(sorted(updated)))
-
-    _verbose(verbose, "Dependencies installed successfully.")
+    marker.write_text(
+        " ".join(sorted(updated))
+    )
 
     return updated
 
