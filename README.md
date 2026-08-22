@@ -95,7 +95,7 @@ runexe version
 - [x] Wine prefix management
 - [x] Winetricks integration
 - [x] Native Wine execution
-- [ ] Improve 32-bit Wine capability detection
+- [x] Improve 32-bit Wine capability detection
 - [ ] Expand dependency detection
 - [ ] Improve compatibility reporting
 
