@@ -92,11 +92,12 @@ def ensure_prefix(
     wine_arch: str,
     verbose: bool = False,
 ) -> None:
-    """Create and boot the Wine prefix if it doesn't already exist."""
+    """Create and initialize the Wine prefix if needed."""
 
-    if prefix.exists():
-        if verbose:
-            print(f"[runexe] Reusing Wine prefix: {prefix}")
+    prefix_ready = (prefix / "drive_c").is_dir()
+
+    if prefix_ready:
+        _verbose(verbose, f"Reusing Wine prefix: {prefix}")
         return
 
     wine_binary = _require_binary("wine")
@@ -127,6 +128,12 @@ def ensure_prefix(
         raise RunnerError(
             f"Wine prefix initialization failed with "
             f"exit code {result.returncode}."
+        )
+
+    if not (prefix / "drive_c").is_dir():
+        raise RunnerError(
+            f"Wine prefix initialization completed, but the prefix "
+            f"appears incomplete: {prefix}"
         )
 
 

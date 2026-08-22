@@ -70,3 +70,12 @@ class CompatibilityReport:
     # installed into the prefix before launch, inferred from imports
     # and the CLR header. See dependencies.py.
     required_verbs: list[str] = field(default_factory=list)
+
+
+@dataclass
+class HostInfo:
+    architecture: str
+    wine_installed: bool
+    wine_path: str | None = None
+    wine_version: str | None = None
+    winetricks_installed: bool = False

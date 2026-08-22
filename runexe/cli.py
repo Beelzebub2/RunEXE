@@ -4,6 +4,7 @@ from runexe.analyzer import analyze_executable
 from runexe.compatibility import analyze_compatibility
 from runexe.resources import extract_requested_execution_level
 from runexe.runner import LaunchResult, RunnerError, launch
+from runexe.host import detect_host
 
 
 app = typer.Typer(
@@ -104,7 +105,10 @@ def analyze(
                 )
 
         # Analyze compatibility.
-        compatibility = analyze_compatibility(result)
+
+        host = detect_host()
+
+        compatibility = analyze_compatibility(result, host)
 
         typer.echo("")
         typer.echo("Compatibility:")
@@ -193,7 +197,9 @@ def run(
             typer.echo(f"Error: {result.reason}")
             raise typer.Exit(code=1)
 
-        compatibility = analyze_compatibility(result)
+        host = detect_host()
+
+        compatibility = analyze_compatibility(result, host)
 
         typer.echo(
             f"Launching {result.path.name} "

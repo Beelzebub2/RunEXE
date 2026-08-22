@@ -9,6 +9,7 @@ from runexe.dependencies import DOTNET_VERB, resolve_verbs_for_imports
 from runexe.models import (
     CompatibilityReport,
     ExecutableInfo,
+    HostInfo,
 )
 from runexe.resources import extract_requested_execution_level
 
@@ -95,7 +96,9 @@ def resolve_dependencies(
 
 def analyze_compatibility(
     executable: ExecutableInfo,
+    host: HostInfo | None = None,
 ) -> CompatibilityReport:
+
     notes = []
 
     # Determine application architecture.
@@ -130,35 +133,89 @@ def analyze_compatibility(
             "ARM64 Windows applications are not supported: "
             "Wine and Proton cannot run Windows-on-ARM binaries."
         )
+
     elif not supported:
         notes.append(
             "Could not determine a WINEARCH value for this "
             "architecture."
         )
 
-    # Classify as game vs. application, and pick a backend accordingly.
+    # ---------------------------------------------------------
+    # Host compatibility
+    # ---------------------------------------------------------
+
+    blocking_issues = []
+
+    if host is not None:
+        notes.append(
+            f"Host architecture: {host.architecture}"
+        )
+
+        if architecture == "x86_64":
+            if host.architecture != "x86_64":
+                supported = False
+                blocking_issues.append(
+                    "This executable requires an x86_64 host."
+                )
+
+        elif architecture == "x86":
+            if host.architecture not in {"x86", "x86_64"}:
+                supported = False
+                blocking_issues.append(
+                    "This executable requires an x86-compatible host."
+                )
+
+        # Wine availability
+        if not host.wine_installed:
+            blocking_issues.append(
+                "Wine is not installed."
+            )
+        else:
+            if host.wine_version:
+                notes.append(
+                    f"Wine detected: {host.wine_version}"
+                )
+            else:
+                notes.append(
+                    "Wine is installed."
+                )
+
+    # ---------------------------------------------------------
+    # Classify as game vs. application
+    # ---------------------------------------------------------
+
     category = classify_application(executable)
 
     if not supported:
         backend = "unsupported"
         recommended_runtime = "Unsupported"
+
     elif category == "game":
         backend = "proton"
         recommended_runtime = "Proton (Steam Play)"
+
         notes.append(
             "Game-related imports detected; Proton is recommended "
             "over plain Wine for DirectX translation and Steam "
             "integration."
         )
+
     else:
         backend = "wine"
         recommended_runtime = "Wine"
 
-    # Check for anti-cheat / DRM that will likely block execution
-    # regardless of backend choice.
-    blocking_issues = detect_blocking_issues(executable)
+    # ---------------------------------------------------------
+    # Anti-cheat / DRM
+    # ---------------------------------------------------------
 
-    # Check for the CLR Runtime Header.
+    blocking_issues.extend(
+        detect_blocking_issues(executable)
+    )
+
+    # ---------------------------------------------------------
+    # .NET detection
+    # ---------------------------------------------------------
+
     is_dotnet = False
 
     if (
@@ -179,28 +236,41 @@ def analyze_compatibility(
     # Determine application type.
     if is_dotnet:
         application_type = ".NET"
+
         notes.append(
             "CLR Runtime Header detected."
         )
+
     else:
         application_type = "Native Windows"
 
-    # Resolve winetricks verbs to pre-install before launch, based on
-    # imports and the .NET check above.
-    required_verbs = resolve_dependencies(executable, is_dotnet)
+    # ---------------------------------------------------------
+    # Dependencies
+    # ---------------------------------------------------------
 
-    # Note the subsystem (GUI apps vs. console apps behave differently
-    # under Wine).
+    required_verbs = resolve_dependencies(
+        executable,
+        is_dotnet,
+    )
+
+    # ---------------------------------------------------------
+    # Subsystem
+    # ---------------------------------------------------------
+
     if executable.subsystem == "Windows Console":
         notes.append(
             "Console application; a terminal window will be used."
         )
+
     elif executable.subsystem == "Windows GUI":
         notes.append(
             "Windows GUI application."
         )
 
-    # Flag elevated-privilege requests declared in an embedded manifest.
+    # ---------------------------------------------------------
+    # Manifest
+    # ---------------------------------------------------------
+
     if executable.manifest:
         execution_level = extract_requested_execution_level(
             executable.manifest

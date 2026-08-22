@@ -1,5 +1,6 @@
 from pathlib import Path
 import struct
+import os
 
 from .models import (
     ExecutableInfo,
@@ -311,8 +312,33 @@ def analyze_executable(file_path: str) -> ExecutableInfo:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
+    if path.is_dir():
+        executables = sorted(
+            item
+            for item in path.iterdir()
+            if item.is_file() and item.suffix.lower() == ".exe"
+        )
+
+        if not executables:
+            raise ValueError(
+                f"No executable files found in directory: {path}"
+            )
+
+        if len(executables) > 1:
+            executable_list = "\n".join(
+                f"  - {executable.name}"
+                for executable in executables
+            )
+
+            raise ValueError(
+                f"Multiple executable files found in directory:\n"
+                f"{executable_list}"
+            )
+
+        return analyze_executable(str(executables[0]))
+
     if not path.is_file():
-        raise ValueError(f"Not a file: {path}")
+        raise ValueError(f"Not a regular file: {path}")
 
     with path.open("rb") as file:
 
