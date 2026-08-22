@@ -106,7 +106,7 @@ def analyze(
 
         # Analyze compatibility.
 
-        host = detect_host()
+        host = detect_host(result)
 
         compatibility = analyze_compatibility(result, host)
 
@@ -197,7 +197,7 @@ def run(
             typer.echo(f"Error: {result.reason}")
             raise typer.Exit(code=1)
 
-        host = detect_host()
+        host = detect_host(result)
 
         compatibility = analyze_compatibility(result, host)
 

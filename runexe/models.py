@@ -76,6 +76,7 @@ class CompatibilityReport:
 class HostInfo:
     architecture: str
     wine_installed: bool
-    wine_path: str | None = None
-    wine_version: str | None = None
-    winetricks_installed: bool = False
+    wine_version: str | None
+    wine_wow64: bool
+    wine_32bit_prefix: bool
+    winetricks_installed: bool

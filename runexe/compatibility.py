@@ -125,7 +125,55 @@ def analyze_compatibility(
         )
 
     # Map the architecture to a WINEARCH value.
-    wine_arch = WINE_ARCH_BY_ARCHITECTURE.get(architecture)
+    if architecture == "x86":
+        if host.wine_32bit_prefix:
+            wine_arch = "win32"
+
+            notes.append(
+                "32-bit Windows executable detected."
+            )
+            notes.append(
+                "Traditional 32-bit Wine prefix support is available."
+            )
+
+        elif host.wine_wow64:
+            wine_arch = "win64"
+
+            notes.append(
+                "Wine WoW64 support detected."
+            )
+            notes.append(
+                "The application will run through a 64-bit Wine prefix."
+            )
+
+        else:
+            wine_arch = None
+            supported = False
+
+            notes.append(
+                "32-bit Windows executable detected."
+            )
+            notes.append(
+                "Neither a traditional 32-bit Wine prefix nor WoW64 "
+                "support is available."
+            )
+            notes.append(
+                "Install Wine with 32-bit/multilib support to run "
+                "32-bit Windows applications."
+            )
+
+    else:
+        wine_arch = WINE_ARCH_BY_ARCHITECTURE.get(architecture)
+
+        if wine_arch is None:
+            supported = False
+            notes.append(
+                "Could not determine a WINEARCH value for this "
+                "architecture."
+            )
+        else:
+            supported = True
+    
     supported = wine_arch is not None
 
     if architecture == "ARM64":
