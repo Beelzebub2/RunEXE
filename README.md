@@ -41,7 +41,7 @@ More compatibility data is one of the long-term goals of the project (see [Roadm
 ## 🔧 Installation
 
 ```bash
-git clone https://github.com/<your-username>/runexe.git
+git clone https://github.com/cdjuaum/runexe.git
 cd runexe
 pip install -e .
 ```
