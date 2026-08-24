@@ -1,77 +1,316 @@
-"""DLL -> winetricks verb mapping.
+"""Executable dependency detection.
 
-Used to pre-emptively install the runtime dependencies an executable's
-imports suggest it needs, before attempting to launch it -- catching a
-missing-DLL failure before it happens rather than parsing it out of
-stderr after the fact.
+This module identifies Windows runtimes and components required or
+strongly suggested by an executable's imports and metadata.
 
-This is a deliberately small, high-confidence set covering the
-runtimes that show up constantly (VC++ redistributables, common D3D
-extension DLLs), not an attempt at an exhaustive list. If you extend
-it, check the verb name against `winetricks list-all` -- winetricks'
-own catalog is the source of truth, not this file. Nothing here has
-been validated against a real winetricks run yet; treat it as a first
-draft to sanity-check, not gospel.
+Dependency detection is intentionally separate from Winetricks
+installation. Detecting a dependency does not necessarily mean that
+RunEXE should install a Winetricks verb for it.
+
+For example, importing d3d11.dll indicates Direct3D 11 usage, but Wine
+already provides d3d11.dll, so there is no reason to install a generic
+"DirectX 11" verb.
+
+The Winetricks mapping is therefore optional and only used for
+dependencies where installing a known runtime is appropriate.
 """
 
-# Visual C++ Redistributable runtimes. VS2015, 2017, 2019 and 2022 all
-# ship binary-compatible, identically-named DLLs for the "140" runtime,
-# so a single `vcrun2015` verb covers all four vcredist releases
-# despite the DLL name only mentioning "140".
-DLL_TO_WINETRICKS_VERB = {
-    # VC++ 2015-2022 runtime (140 series)
-    "msvcp140.dll": "vcrun2015",
-    "vcruntime140.dll": "vcrun2015",
-    "vcruntime140_1.dll": "vcrun2015",
-    "concrt140.dll": "vcrun2015",
-    # VC++ 2013 runtime (120 series)
-    "msvcp120.dll": "vcrun2013",
-    "msvcr120.dll": "vcrun2013",
-    # VC++ 2012 runtime (110 series)
-    "msvcp110.dll": "vcrun2012",
-    "msvcr110.dll": "vcrun2012",
-    # VC++ 2010 runtime (100 series)
-    "msvcp100.dll": "vcrun2010",
-    "msvcr100.dll": "vcrun2010",
-    # VC++ 2008 runtime (90 series)
-    "msvcp90.dll": "vcrun2008",
-    "msvcr90.dll": "vcrun2008",
-    # VC++ 2005 runtime (80 series)
-    "msvcr80.dll": "vcrun2005",
-    # Direct3D 9 extension library, commonly missing on older titles.
-    "d3dx9_43.dll": "d3dx9",
-    "d3dx9_42.dll": "d3dx9",
-    "d3dx9_41.dll": "d3dx9",
-    "d3dx9_40.dll": "d3dx9",
-    # Direct3D 11 compiler / effects helper libraries.
-    "d3dcompiler_43.dll": "d3dcompiler_43",
-    "d3dcompiler_47.dll": "d3dcompiler_47",
-    # OpenAL, common in older audio engines.
-    "openal32.dll": "openal",
+from .models import Dependency, PEImport
+
+
+# DLL -> dependency information.
+#
+# Keep this list conservative. A DLL should only be added when its
+# presence is a reliable indicator of the corresponding runtime or
+# component.
+
+DLL_DEPENDENCIES: dict[str, Dependency] = {
+
+    # ---------------------------------------------------------
+    # Microsoft Visual C++ Redistributables
+    # ---------------------------------------------------------
+
+    "msvcp140.dll": Dependency(
+        name="Microsoft Visual C++ Runtime",
+        category="runtime",
+        confidence="high",
+        winetricks_verb="vcrun2015",
+    ),
+
+    "vcruntime140.dll": Dependency(
+        name="Microsoft Visual C++ Runtime",
+        category="runtime",
+        confidence="high",
+        winetricks_verb="vcrun2015",
+    ),
+
+    "vcruntime140_1.dll": Dependency(
+        name="Microsoft Visual C++ Runtime",
+        category="runtime",
+        confidence="high",
+        winetricks_verb="vcrun2015",
+    ),
+
+    "concrt140.dll": Dependency(
+        name="Microsoft Visual C++ Runtime",
+        category="runtime",
+        confidence="high",
+        winetricks_verb="vcrun2015",
+    ),
+
+    "msvcp120.dll": Dependency(
+        name="Microsoft Visual C++ Runtime 2013",
+        category="runtime",
+        confidence="high",
+        winetricks_verb="vcrun2013",
+    ),
+
+    "msvcr120.dll": Dependency(
+        name="Microsoft Visual C++ Runtime 2013",
+        category="runtime",
+        confidence="high",
+        winetricks_verb="vcrun2013",
+    ),
+
+    "msvcp110.dll": Dependency(
+        name="Microsoft Visual C++ Runtime 2012",
+        category="runtime",
+        confidence="high",
+        winetricks_verb="vcrun2012",
+    ),
+
+    "msvcr110.dll": Dependency(
+        name="Microsoft Visual C++ Runtime 2012",
+        category="runtime",
+        confidence="high",
+        winetricks_verb="vcrun2012",
+    ),
+
+    "msvcp100.dll": Dependency(
+        name="Microsoft Visual C++ Runtime 2010",
+        category="runtime",
+        confidence="high",
+        winetricks_verb="vcrun2010",
+    ),
+
+    "msvcr100.dll": Dependency(
+        name="Microsoft Visual C++ Runtime 2010",
+        category="runtime",
+        confidence="high",
+        winetricks_verb="vcrun2010",
+    ),
+
+    "msvcp90.dll": Dependency(
+        name="Microsoft Visual C++ Runtime 2008",
+        category="runtime",
+        confidence="high",
+        winetricks_verb="vcrun2008",
+    ),
+
+    "msvcr90.dll": Dependency(
+        name="Microsoft Visual C++ Runtime 2008",
+        category="runtime",
+        confidence="high",
+        winetricks_verb="vcrun2008",
+    ),
+
+    "msvcr80.dll": Dependency(
+        name="Microsoft Visual C++ Runtime 2005",
+        category="runtime",
+        confidence="high",
+        winetricks_verb="vcrun2005",
+    ),
+
+    # ---------------------------------------------------------
+    # Direct3D
+    # ---------------------------------------------------------
+
+    "d3dx9_40.dll": Dependency(
+        name="Direct3D 9 Extensions",
+        category="graphics",
+        confidence="high",
+        winetricks_verb="d3dx9",
+    ),
+
+    "d3dx9_41.dll": Dependency(
+        name="Direct3D 9 Extensions",
+        category="graphics",
+        confidence="high",
+        winetricks_verb="d3dx9",
+    ),
+
+    "d3dx9_42.dll": Dependency(
+        name="Direct3D 9 Extensions",
+        category="graphics",
+        confidence="high",
+        winetricks_verb="d3dx9",
+    ),
+
+    "d3dx9_43.dll": Dependency(
+        name="Direct3D 9 Extensions",
+        category="graphics",
+        confidence="high",
+        winetricks_verb="d3dx9",
+    ),
+
+    "d3dcompiler_43.dll": Dependency(
+        name="Direct3D Shader Compiler",
+        category="graphics",
+        confidence="high",
+        winetricks_verb="d3dcompiler_43",
+    ),
+
+    "d3dcompiler_47.dll": Dependency(
+        name="Direct3D Shader Compiler",
+        category="graphics",
+        confidence="high",
+        winetricks_verb="d3dcompiler_47",
+    ),
+
+    # These indicate Direct3D usage but do not require a Winetricks
+    # installation by themselves.
+
+    "d3d9.dll": Dependency(
+        name="Direct3D 9",
+        category="graphics",
+        confidence="high",
+    ),
+
+    "d3d10.dll": Dependency(
+        name="Direct3D 10",
+        category="graphics",
+        confidence="high",
+        winetricks_verb="dxvk",
+    ),
+
+    "d3d10_1.dll": Dependency(
+        name="Direct3D 10.1",
+        category="graphics",
+        confidence="high",
+        winetricks_verb="dxvk",
+    ),
+
+    "d3d11.dll": Dependency(
+        name="Direct3D 11",
+        category="graphics",
+        confidence="high",
+        winetricks_verb="dxvk",
+    ),
+
+    "dxgi.dll": Dependency(
+        name="DirectX Graphics Infrastructure",
+        category="graphics",
+        confidence="high",
+        winetricks_verb="dxvk",
+    ),
+
+    # ---------------------------------------------------------
+    # Input
+    # ---------------------------------------------------------
+
+    "xinput1_3.dll": Dependency(
+        name="XInput",
+        category="input",
+        confidence="high",
+        winetricks_verb="xinput",
+    ),
+
+    "xinput1_4.dll": Dependency(
+        name="XInput",
+        category="input",
+        confidence="high",
+    ),
+
+    # ---------------------------------------------------------
+    # Audio
+    # ---------------------------------------------------------
+
+    "openal32.dll": Dependency(
+        name="OpenAL",
+        category="audio",
+        confidence="high",
+        winetricks_verb="openal",
+    ),
+
+    "xaudio2_7.dll": Dependency(
+        name="XAudio 2.7",
+        category="audio",
+        confidence="high",
+        winetricks_verb="xact",
+    ),
+
+    # ---------------------------------------------------------
+    # Multimedia
+    # ---------------------------------------------------------
+
+    "mf.dll": Dependency(
+        name="Windows Media Foundation",
+        category="multimedia",
+        confidence="high",
+    ),
+
+    "mfplat.dll": Dependency(
+        name="Windows Media Foundation",
+        category="multimedia",
+        confidence="high",
+    ),
+
+    "mfreadwrite.dll": Dependency(
+        name="Windows Media Foundation",
+        category="multimedia",
+        confidence="high",
+    ),
 }
 
-# .NET is detected via the CLR Runtime Header (see analyzer.py /
-# compatibility.py), not via an import name, so it isn't in the table
-# above -- it gets its own branch in resolve_dependencies(). This verb
-# targets classic .NET Framework apps; a .NET Core / 5+ app usually
-# ships self-contained or needs wine-mono instead. Telling those apart
-# would require reading assembly metadata this parser doesn't extract
-# yet, so this is a reasonable default, not the final word.
+
 DOTNET_VERB = "dotnet48"
 
 
-def resolve_verbs_for_imports(dll_names: list[str]) -> list[str]:
-    """Map a list of imported DLL names to deduplicated winetricks
-    verbs, preserving first-seen order."""
+def detect_dependencies(
+    imports: list[PEImport],
+) -> list[Dependency]:
+    """Detect runtime/component dependencies from PE imports."""
+
+    dependencies: list[Dependency] = []
+    seen: set[tuple[str, str]] = set()
+
+    for imported in imports or []:
+        dependency = DLL_DEPENDENCIES.get(
+            imported.name.lower()
+        )
+
+        if dependency is None:
+            continue
+
+        key = (
+            dependency.name,
+            dependency.category,
+        )
+
+        if key in seen:
+            continue
+
+        dependencies.append(dependency)
+        seen.add(key)
+
+    return dependencies
+
+
+def resolve_verbs_for_dependencies(
+    dependencies: list[Dependency],
+) -> list[str]:
+    """Return the Winetricks verbs required by detected dependencies."""
 
     verbs: list[str] = []
-    seen = set()
+    seen: set[str] = set()
 
-    for dll_name in dll_names:
-        verb = DLL_TO_WINETRICKS_VERB.get(dll_name.lower())
+    for dependency in dependencies:
+        verb = dependency.winetricks_verb
 
-        if verb is not None and verb not in seen:
-            verbs.append(verb)
-            seen.add(verb)
+        if verb is None or verb in seen:
+            continue
+
+        verbs.append(verb)
+        seen.add(verb)
 
     return verbs

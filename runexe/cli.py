@@ -164,6 +164,17 @@ def analyze(
             for note in compatibility.notes:
                 typer.echo(f"  - {note}")
 
+        if compatibility.dependencies:
+            typer.echo("")
+            typer.echo("Dependencies:")
+
+            for dependency in compatibility.dependencies:
+                typer.echo(
+                    f"  {dependency.name}"
+                    f" ({dependency.category}, "
+                    f"{dependency.confidence} confidence)"
+                )
+
     except FileNotFoundError as error:
         typer.echo(f"Error: {error}")
         raise typer.Exit(code=1)
@@ -186,6 +197,11 @@ def run(
         "--verbose",
         "-v",
         help="Show more information about the launch process.",
+    ),
+    winver: str | None = typer.Option(
+        None,
+        "--winver",
+        help="Force a specific Windows version for the Wine prefix (e.g. 'win10').",
     ),
 ):
     """Analyze, provision a prefix, and run a Windows executable."""
@@ -230,6 +246,7 @@ def run(
             compatibility,
             timeout=timeout,
             verbose=verbose,
+            winver=winver,
         )
 
         if launch_result.timed_out:

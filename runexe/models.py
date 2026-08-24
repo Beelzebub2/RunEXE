@@ -70,6 +70,17 @@ class CompatibilityReport:
     # installed into the prefix before launch, inferred from imports
     # and the CLR header. See dependencies.py.
     required_verbs: list[str] = field(default_factory=list)
+    dependencies: list[Dependency] = field(default_factory=list)
+
+
+@dataclass
+class Dependency:
+    """A runtime or Windows component detected from an executable."""
+
+    name: str
+    category: str
+    confidence: str = "high"
+    winetricks_verb: str | None = None
 
 
 @dataclass

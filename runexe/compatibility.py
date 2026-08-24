@@ -5,11 +5,16 @@ from runexe.constants import (
     STEAM_API_DLLS,
     WINE_ARCH_BY_ARCHITECTURE,
 )
-from runexe.dependencies import DOTNET_VERB, resolve_verbs_for_imports
+from runexe.dependencies import (
+    DOTNET_VERB, 
+    detect_dependencies, 
+    resolve_verbs_for_dependencies,
+)
 from runexe.models import (
     CompatibilityReport,
     ExecutableInfo,
     HostInfo,
+    Dependency,
 )
 from runexe.resources import extract_requested_execution_level
 
@@ -69,29 +74,40 @@ def classify_application(executable: ExecutableInfo) -> str:
     return "application"
 
 
-def resolve_dependencies(
-    executable: ExecutableInfo,
-    is_dotnet: bool,
-) -> list[str]:
-    """Return the winetricks verbs that should be installed into the
-    prefix before launch, based on imported DLLs and the CLR header.
+def detect_apphost_dotnet(executable_path: Path) -> bool:
+    """Detect modern .NET (Core 3.0+) apphost executables.
 
-    .NET is handled as its own branch rather than a table entry: it's
-    detected structurally (the CLR Runtime Header), not by an import
-    name, and it needs a different kind of remediation (a Framework
-    installer, or wine-mono) than a plain vcrun/d3dx verb.
+    Since .NET Core 3.0, `dotnet publish` produces a native launcher
+    stub (no CLR Runtime Header -- see the COM Descriptor check below)
+    alongside the actual managed assembly and a `<name>.runtimeconfig.json`
+    describing which runtime to load. The stub loads `hostfxr.dll`
+    dynamically at runtime, so there's no PE-level signal (no CLR
+    header, no static import) that marks it as .NET -- the
+    runtimeconfig.json sitting next to it is the only reliable tell.
+
+    This only catches apps published as apphost stubs (the SDK
+    default). Self-contained, single-file-trimmed publishes fold the
+    runtimeconfig into the binary and won't have a separate JSON file
+    -- that case isn't handled here and would need a different check
+    (e.g. scanning for an embedded PE resource).
     """
 
-    imported_names = [
-        imported.name for imported in (executable.imports or [])
-    ]
+    runtimeconfig = executable_path.with_suffix(".runtimeconfig.json")
 
-    verbs = resolve_verbs_for_imports(imported_names)
+    if runtimeconfig.exists():
+        return True
 
-    if is_dotnet and DOTNET_VERB not in verbs:
-        verbs.append(DOTNET_VERB)
+    # Publish tooling doesn't always preserve exact case on
+    # case-sensitive filesystems; fall back to a case-insensitive
+    # sibling scan before giving up.
+    stem_lower = executable_path.stem.lower()
 
-    return verbs
+    return any(
+        sibling.stem.lower() == stem_lower
+        and sibling.suffix.lower() == ".json"
+        and sibling.name.lower().endswith("runtimeconfig.json")
+        for sibling in executable_path.parent.glob("*.json")
+    )
 
 
 def analyze_compatibility(
@@ -265,6 +281,7 @@ def analyze_compatibility(
     # ---------------------------------------------------------
 
     is_dotnet = False
+    is_dotnet_apphost = False
 
     if (
         executable.data_directories
@@ -281,13 +298,24 @@ def analyze_compatibility(
         ):
             is_dotnet = True
 
+    if not is_dotnet and detect_apphost_dotnet(executable.path):
+        is_dotnet = True
+        is_dotnet_apphost = True
+
     # Determine application type.
     if is_dotnet:
         application_type = ".NET"
 
-        notes.append(
-            "CLR Runtime Header detected."
-        )
+        if is_dotnet_apphost:
+            notes.append(
+                "Modern .NET apphost detected via runtimeconfig.json "
+                "(no CLR Runtime Header present -- this is a native "
+                "launcher stub, not a managed executable)."
+            )
+        else:
+            notes.append(
+                "CLR Runtime Header detected."
+            )
 
     else:
         application_type = "Native Windows"
@@ -296,9 +324,35 @@ def analyze_compatibility(
     # Dependencies
     # ---------------------------------------------------------
 
-    required_verbs = resolve_dependencies(
-        executable,
-        is_dotnet,
+    dependencies = detect_dependencies(
+        executable.imports or []
+    )
+
+    # .NET is detected structurally through the CLR Runtime Header,
+    # rather than through an imported DLL.
+    if is_dotnet:
+        dependencies.append(
+            Dependency(
+                name=".NET Framework",
+                category="runtime",
+                confidence="high",
+                winetricks_verb=DOTNET_VERB,
+            )
+        )
+        #========================
+        # Add DXVK dependency for .NET applications, might be removed later
+        #========================
+        dependencies.append(
+            Dependency(
+                name="DXVK (DirectX-to-Vulkan, common .NET/WPF requirement)",
+                category="graphics",
+                confidence="medium",
+                winetricks_verb="dxvk",
+            )
+        )
+
+    required_verbs = resolve_verbs_for_dependencies(
+        dependencies
     )
 
     # ---------------------------------------------------------
@@ -340,5 +394,6 @@ def analyze_compatibility(
         supported=supported,
         blocking_issues=blocking_issues,
         notes=notes,
+        dependencies=dependencies,
         required_verbs=required_verbs,
     )

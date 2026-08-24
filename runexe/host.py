@@ -115,6 +115,8 @@ def detect_host(executable: ExecutableInfo,) -> HostInfo:
         ):
             pass
         
+        wine_wow64 = False
+        wine_32bit_prefix = False
         if executable.architecture == "x86":
 
             wine_32bit_prefix = _wine_supports_32bit_prefix(

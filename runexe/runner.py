@@ -137,6 +137,64 @@ def ensure_prefix(
         )
 
 
+def set_windows_version(
+    prefix: Path,
+    wine_arch: str,
+    winver: str,
+    verbose: bool = False,
+) -> None:
+    """Set the Windows version reported by Wine for this prefix."""
+
+    supported_versions = {
+        "7": "win7",
+        "8": "win8",
+        "8.1": "win81",
+        "10": "win10",
+        "11": "win11",
+    }
+
+    wine_version = supported_versions.get(winver)
+
+    if wine_version is None:
+        raise RunnerError(
+            f"Unsupported Windows version '{winver}'. "
+            f"Supported versions: {', '.join(supported_versions)}"
+        )
+
+    wine_binary = _require_binary("wine")
+
+    command = [
+        wine_binary,
+        "winecfg",
+        "/v",
+        wine_version,
+    ]
+
+    _verbose(
+        verbose,
+        f"Setting Wine Windows version: Windows {winver}",
+    )
+
+    try:
+        result = run_with_progress(
+            command,
+            env=_wine_env(prefix, wine_arch),
+            description=f"Configuring Wine for Windows {winver}",
+            timeout=60,
+            verbose=verbose,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RunnerError(
+            f"Timed out configuring Wine Windows version to {winver}."
+        ) from error
+
+    if result.returncode != 0:
+        raise RunnerError(
+            f"Failed to configure Wine Windows version "
+            f"to {winver} (exit code {result.returncode})."
+        )
+
+
 def install_verbs(
     prefix: Path,
     verbs: list[str],
@@ -221,6 +279,7 @@ def launch(
     extra_args: list[str] | None = None,
     timeout: int | None = None,
     verbose: bool = False,
+    winver: str | None = None,
 ) -> LaunchResult:
     """Provision the prefix and run the executable under Wine."""
 
@@ -277,6 +336,14 @@ def launch(
         wine_arch,
         verbose=verbose,
     )
+
+    if winver is not None:
+        set_windows_version(
+            prefix,
+            wine_arch,
+            winver,
+            verbose=verbose,
+        )
 
     if compatibility.required_verbs:
         install_verbs(
