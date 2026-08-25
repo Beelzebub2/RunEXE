@@ -115,11 +115,19 @@ def detect_apphost_dotnet(executable_path: Path) -> bool:
 
 def detect_apphost_dotnet_version(
     executable_path: Path,
-) -> str | None:
-    """Return the .NET runtime version from an apphost runtimeconfig.
+) -> tuple[str | None, bool]:
+    """Return (version, is_desktop) from an apphost runtimeconfig.
 
-    Returns values such as "8.0.19" or None if the runtimeconfig
-    cannot be found or does not contain a framework version.
+    `is_desktop` tells us whether the app targets
+    Microsoft.WindowsDesktop.App (WPF/WinForms -- needs a
+    `dotnetdesktopN` Winetricks verb) rather than plain
+    Microsoft.NETCore.App (console/headless -- needs `dotnetN`).
+    Getting this wrong is exactly what caused RunEXE to queue the
+    wrong verb for Paint.NET, so both pieces of information have to
+    travel together rather than just returning a bare version string.
+
+    Returns (None, False) if the runtimeconfig can't be found or
+    doesn't contain a usable framework entry.
     """
 
     runtimeconfig = executable_path.with_suffix(
@@ -144,16 +152,20 @@ def detect_apphost_dotnet_version(
         )
 
     if runtimeconfig is None:
-        return None
+        return None, False
 
     try:
+        # dotnet publish emits runtimeconfig.json with a UTF-8 BOM in
+        # some SDK versions (confirmed on a real Paint.NET 5.x publish);
+        # utf-8-sig strips it if present and behaves like plain utf-8
+        # if not, so it's the safe choice either way.
         with runtimeconfig.open(
             "r",
-            encoding="utf-8",
+            encoding="utf-8-sig",
         ) as file:
             data = json.load(file)
     except (OSError, json.JSONDecodeError):
-        return None
+        return None, False
 
     runtime_options = data.get("runtimeOptions", {})
 
@@ -163,30 +175,84 @@ def detect_apphost_dotnet_version(
         version = framework.get("version")
 
         if isinstance(version, str):
-            return version
+            return (
+                version,
+                framework.get("name") == "Microsoft.WindowsDesktop.App",
+            )
 
+    def _pick_desktop_or_core(
+        entries: list,
+    ) -> tuple[str | None, bool]:
+        """Scan a list of {"name", "version"} framework entries and
+        prefer the Desktop one -- an app that references both is a
+        desktop app that also needs the base runtime, and the desktop
+        verb pulls the base runtime in too."""
+
+        desktop_version = None
+        core_version = None
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+
+            name = entry.get("name")
+            version = entry.get("version")
+
+            if not isinstance(version, str):
+                continue
+
+            if name == "Microsoft.WindowsDesktop.App":
+                desktop_version = version
+            elif name == "Microsoft.NETCore.App":
+                core_version = version
+
+        if desktop_version is not None:
+            return desktop_version, True
+
+        if core_version is not None:
+            return core_version, False
+
+        return None, False
+
+    # "frameworks" (plural): framework-dependent apps that reference
+    # more than one shared framework (e.g. ASP.NET Core apps pulling
+    # in both the ASP.NET Core and base runtime shared frameworks).
     frameworks = runtime_options.get("frameworks")
 
     if isinstance(frameworks, list):
-        for framework in frameworks:
-            if not isinstance(framework, dict):
-                continue
+        version, is_desktop = _pick_desktop_or_core(frameworks)
 
-            if framework.get("name") != "Microsoft.NETCore.App":
-                continue
+        if version is not None:
+            return version, is_desktop
 
-            version = framework.get("version")
+    # "includedFrameworks": self-contained publishes, where every
+    # framework version bundled with the app is listed here instead
+    # of "framework"/"frameworks". This is the shape Paint.NET 5.x's
+    # apphost actually uses.
+    included_frameworks = runtime_options.get("includedFrameworks")
 
-            if isinstance(version, str):
-                return version
+    if isinstance(included_frameworks, list):
+        version, is_desktop = _pick_desktop_or_core(included_frameworks)
 
-    return None
+        if version is not None:
+            return version, is_desktop
+
+    return None, False
 
 
 def dotnet_version_to_verb(
     dotnet_version: str | None,
+    is_desktop: bool,
 ) -> str | None:
-    """Return the Winetricks verb for a detected .NET runtime version."""
+    """Return the Winetricks verb for a detected .NET runtime version.
+
+    `is_desktop` selects between the `dotnetdesktopN` verbs (WPF/
+    WinForms apps -- includes the base runtime) and the plain
+    `dotnetN` verbs (console/headless apps). Returns None for versions
+    without a known verb (e.g. pre-8.0 base runtime, or anything not
+    in the maps below) -- callers should surface a note rather than
+    silently install nothing.
+    """
 
     if dotnet_version is None:
         return None
@@ -198,13 +264,25 @@ def dotnet_version_to_verb(
 
     major_minor = f"{parts[0]}.{parts[1]}"
 
-    version_to_verb = {
+    desktop_version_to_verb = {
+        "6.0": "dotnetdesktop6",
+        "7.0": "dotnetdesktop7",
+        "8.0": "dotnetdesktop8",
+        "9.0": "dotnetdesktop9",
+        "10.0": "dotnetdesktop10",
+    }
+
+    runtime_version_to_verb = {
         "8.0": "dotnet8",
         "9.0": "dotnet9",
         "10.0": "dotnet10",
     }
 
-    return version_to_verb.get(major_minor)
+    verb_map = (
+        desktop_version_to_verb if is_desktop else runtime_version_to_verb
+    )
+
+    return verb_map.get(major_minor)
 
 
 def analyze_compatibility(
@@ -239,7 +317,7 @@ def analyze_compatibility(
 
     # Map the architecture to a WINEARCH value.
     if architecture == "x86":
-        if host.wine_32bit_prefix:
+        if host is not None and host.wine_32bit_prefix:
             wine_arch = "win32"
 
             notes.append(
@@ -248,8 +326,9 @@ def analyze_compatibility(
             notes.append(
                 "Traditional 32-bit Wine prefix support is available."
             )
+            supported = True
 
-        elif host.wine_wow64:
+        elif host is not None and host.wine_wow64:
             wine_arch = "win64"
 
             notes.append(
@@ -258,6 +337,7 @@ def analyze_compatibility(
             notes.append(
                 "The application will run through a 64-bit Wine prefix."
             )
+            supported = True
 
         else:
             wine_arch = None
@@ -266,39 +346,38 @@ def analyze_compatibility(
             notes.append(
                 "32-bit Windows executable detected."
             )
-            notes.append(
-                "Neither a traditional 32-bit Wine prefix nor WoW64 "
-                "support is available."
-            )
-            notes.append(
-                "Install Wine with 32-bit/multilib support to run "
-                "32-bit Windows applications."
-            )
+
+            if host is None:
+                notes.append(
+                    "Could not determine 32-bit/WoW64 Wine support "
+                    "without host information."
+                )
+            else:
+                notes.append(
+                    "Neither a traditional 32-bit Wine prefix nor WoW64 "
+                    "support is available."
+                )
+                notes.append(
+                    "Install Wine with 32-bit/multilib support to run "
+                    "32-bit Windows applications."
+                )
 
     else:
+        # x86 is fully handled above; WINE_ARCH_BY_ARCHITECTURE only
+        # ever gets consulted here for x86_64/ARM64/unknown.
         wine_arch = WINE_ARCH_BY_ARCHITECTURE.get(architecture)
+        supported = wine_arch is not None
 
         if wine_arch is None:
-            supported = False
             notes.append(
                 "Could not determine a WINEARCH value for this "
                 "architecture."
             )
-        else:
-            supported = True
-    
-    supported = wine_arch is not None
 
     if architecture == "ARM64":
         notes.append(
             "ARM64 Windows applications are not supported: "
             "Wine and Proton cannot run Windows-on-ARM binaries."
-        )
-
-    elif not supported:
-        notes.append(
-            "Could not determine a WINEARCH value for this "
-            "architecture."
         )
 
     # ---------------------------------------------------------
@@ -400,13 +479,16 @@ def analyze_compatibility(
         is_dotnet_apphost = True
 
     dotnet_version = None
+    dotnet_is_desktop = False
 
     # Determine application type.
     if is_dotnet:
         application_type = ".NET"
 
         if is_dotnet_apphost:
-            dotnet_version = detect_apphost_dotnet_version(executable.path)
+            dotnet_version, dotnet_is_desktop = detect_apphost_dotnet_version(
+                executable.path
+            )
             notes.append(
                 "Modern .NET apphost detected via runtimeconfig.json "
                 "(no CLR Runtime Header present -- this is a native "
@@ -441,27 +523,48 @@ def analyze_compatibility(
                 )
             )
         else:
-            verb = dotnet_version_to_verb(dotnet_version)
+            verb = dotnet_version_to_verb(
+                dotnet_version, dotnet_is_desktop
+            )
+
+            if dotnet_version is not None:
+                kind = "Desktop" if dotnet_is_desktop else "Runtime"
+                name = f".NET {dotnet_version} ({kind} apphost)"
+            else:
+                name = ".NET apphost (version unknown)"
 
             dependencies.append(
                 Dependency(
-                    name=f".NET {dotnet_version} (apphost)",
+                    name=name,
                     category="runtime",
-                    confidence="high",
+                    confidence="high" if verb else "low",
                     winetricks_verb=verb,
                 )
             )
-        #========================
-        # Add DXVK dependency for .NET applications, might be removed later
-        #========================
-        dependencies.append(
-            Dependency(
-                name="DXVK (DirectX-to-Vulkan, common .NET/WPF requirement)",
-                category="graphics",
-                confidence="medium",
-                winetricks_verb="dxvk",
+
+            if verb is None:
+                notes.append(
+                    "Could not determine the Winetricks verb for this "
+                    "app's .NET runtime from runtimeconfig.json; "
+                    "install the matching .NET "
+                    + ("Desktop Runtime" if dotnet_is_desktop else "Runtime")
+                    + " manually."
+                )
+
+        # DXVK is only relevant to apps that actually render something;
+        # a headless .NET console tool has no use for it. Gated on
+        # subsystem rather than added unconditionally for every .NET
+        # app. Might still be removed later if this proves too broad
+        # (e.g. GUI apps that are pure business/CRUD with no graphics).
+        if executable.subsystem == "Windows GUI":
+            dependencies.append(
+                Dependency(
+                    name="DXVK (DirectX-to-Vulkan, common .NET/WPF requirement)",
+                    category="graphics",
+                    confidence="medium",
+                    winetricks_verb="dxvk",
+                )
             )
-        )
 
     required_verbs = resolve_verbs_for_dependencies(
         dependencies
