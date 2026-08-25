@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from runexe.constants import (
     ANTI_CHEAT_DLLS,
     GAME_SIGNAL_DLLS,
@@ -108,6 +111,100 @@ def detect_apphost_dotnet(executable_path: Path) -> bool:
         and sibling.name.lower().endswith("runtimeconfig.json")
         for sibling in executable_path.parent.glob("*.json")
     )
+
+
+def detect_apphost_dotnet_version(
+    executable_path: Path,
+) -> str | None:
+    """Return the .NET runtime version from an apphost runtimeconfig.
+
+    Returns values such as "8.0.19" or None if the runtimeconfig
+    cannot be found or does not contain a framework version.
+    """
+
+    runtimeconfig = executable_path.with_suffix(
+        ".runtimeconfig.json"
+    )
+
+    if not runtimeconfig.exists():
+        stem_lower = executable_path.stem.lower()
+
+        runtimeconfig = next(
+            (
+                sibling
+                for sibling in executable_path.parent.glob("*.json")
+                if (
+                    sibling.stem.lower() == stem_lower
+                    and sibling.name.lower().endswith(
+                        "runtimeconfig.json"
+                    )
+                )
+            ),
+            None,
+        )
+
+    if runtimeconfig is None:
+        return None
+
+    try:
+        with runtimeconfig.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+            data = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    runtime_options = data.get("runtimeOptions", {})
+
+    framework = runtime_options.get("framework")
+
+    if isinstance(framework, dict):
+        version = framework.get("version")
+
+        if isinstance(version, str):
+            return version
+
+    frameworks = runtime_options.get("frameworks")
+
+    if isinstance(frameworks, list):
+        for framework in frameworks:
+            if not isinstance(framework, dict):
+                continue
+
+            if framework.get("name") != "Microsoft.NETCore.App":
+                continue
+
+            version = framework.get("version")
+
+            if isinstance(version, str):
+                return version
+
+    return None
+
+
+def dotnet_version_to_verb(
+    dotnet_version: str | None,
+) -> str | None:
+    """Return the Winetricks verb for a detected .NET runtime version."""
+
+    if dotnet_version is None:
+        return None
+
+    parts = dotnet_version.split(".")
+
+    if len(parts) < 2:
+        return None
+
+    major_minor = f"{parts[0]}.{parts[1]}"
+
+    version_to_verb = {
+        "8.0": "dotnet8",
+        "9.0": "dotnet9",
+        "10.0": "dotnet10",
+    }
+
+    return version_to_verb.get(major_minor)
 
 
 def analyze_compatibility(
@@ -302,11 +399,14 @@ def analyze_compatibility(
         is_dotnet = True
         is_dotnet_apphost = True
 
+    dotnet_version = None
+
     # Determine application type.
     if is_dotnet:
         application_type = ".NET"
 
         if is_dotnet_apphost:
+            dotnet_version = detect_apphost_dotnet_version(executable.path)
             notes.append(
                 "Modern .NET apphost detected via runtimeconfig.json "
                 "(no CLR Runtime Header present -- this is a native "
@@ -331,14 +431,26 @@ def analyze_compatibility(
     # .NET is detected structurally through the CLR Runtime Header,
     # rather than through an imported DLL.
     if is_dotnet:
-        dependencies.append(
-            Dependency(
-                name=".NET Framework",
-                category="runtime",
-                confidence="high",
-                winetricks_verb=DOTNET_VERB,
+        if not is_dotnet_apphost:
+            dependencies.append(
+                Dependency(
+                    name="Older .NET Framework",
+                    category="runtime",
+                    confidence="high",
+                    winetricks_verb=DOTNET_VERB,
+                )
             )
-        )
+        else:
+            verb = dotnet_version_to_verb(dotnet_version)
+
+            dependencies.append(
+                Dependency(
+                    name=f".NET {dotnet_version} (apphost)",
+                    category="runtime",
+                    confidence="high",
+                    winetricks_verb=verb,
+                )
+            )
         #========================
         # Add DXVK dependency for .NET applications, might be removed later
         #========================

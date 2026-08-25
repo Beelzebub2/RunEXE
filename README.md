@@ -10,8 +10,10 @@ RunEXE inspects a Windows `.exe` (architecture, imports, subsystem, embedded man
 
 The following have been run through RunEXE with **no additional setup** beyond what the tool provisions automatically:
 
-- Notepad++
-- PuTTY.exe
+- Notepad++ (Native)
+- Notepad++ (32-bit)
+- PuTTY.exe (Native)
+- KeePass (.NET)
 
 More compatibility data is one of the long-term goals of the project (see [Roadmap](#-roadmap)).
 
