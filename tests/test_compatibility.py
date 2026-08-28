@@ -31,12 +31,22 @@ def test_single_generic_graphics_import_is_not_enough_to_call_app_a_game(tmp_pat
 
 def test_game_uses_available_wine_backend_and_recommends_proton(tmp_path):
     app = executable(tmp_path, [PEImport("d3d11.dll"), PEImport("xinput1_3.dll")])
+    host = HostInfo(
+        "x86_64",
+        True,
+        "wine-10",
+        True,
+        True,
+        True,
+        proton_installed=True,
+        proton_versions=["Proton Experimental"],
+    )
 
-    report = analyze_compatibility(app)
+    report = analyze_compatibility(app, host)
 
     assert report.category == "game"
-    assert report.backend == "wine"
-    assert "Proton" in report.recommended_runtime
+    assert report.backend == "proton"
+    assert report.recommended_runtime == "Proton Experimental"
 
 
 def test_anti_cheat_is_a_warning_not_a_hard_blocker(tmp_path):

@@ -114,3 +114,5 @@ class HostInfo:
     wine_wow64: bool | None
     wine_32bit_prefix: bool | None
     winetricks_installed: bool
+    proton_installed: bool = False
+    proton_versions: list[str] = field(default_factory=list)

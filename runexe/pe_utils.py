@@ -83,9 +83,9 @@ def run_with_progress(
             print(f"[runexe] Failed with exit code {result.returncode}.")
     else:
         if result.returncode == 0:
-            sys.stdout.write("✓\n")
+            sys.stdout.write("ok\n")
         else:
-            sys.stdout.write("✗\n")
+            sys.stdout.write("failed\n")
 
         sys.stdout.flush()
 

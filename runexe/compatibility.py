@@ -286,8 +286,10 @@ def dotnet_version_to_verb(
 def analyze_compatibility(
     executable: ExecutableInfo,
     host: HostInfo | None = None,
+    backend_preference: str = "auto",
 ) -> CompatibilityReport:
-
+    if backend_preference not in {"auto", "wine", "proton"}:
+        raise ValueError(f"Unknown backend preference: {backend_preference}")
     notes = []
 
     # Determine application architecture.
@@ -364,14 +366,12 @@ def analyze_compatibility(
                 supported = False
                 blocking_issues.append("This executable requires an x86-compatible host.")
 
-        # Wine availability
-        if not host.wine_installed:
-            blocking_issues.append("Wine is not installed.")
-        else:
-            if host.wine_version:
-                notes.append(f"Wine detected: {host.wine_version}")
-            else:
-                notes.append("Wine is installed.")
+        if host.wine_installed:
+            notes.append(
+                f"Wine detected: {host.wine_version}" if host.wine_version else "Wine is installed."
+            )
+        if host.proton_installed:
+            notes.append("Proton detected: " + ", ".join(host.proton_versions))
 
     # ---------------------------------------------------------
     # Classify as game vs. application
@@ -379,24 +379,48 @@ def analyze_compatibility(
 
     category = classify_application(executable)
 
+    wine_available = host is None or host.wine_installed
+    proton_available = host is None or host.proton_installed
+
     if not supported:
         backend = "unsupported"
         recommended_runtime = "Unsupported"
-
-    elif category == "game":
-        # Proton provisioning is not implemented yet. Use the supported Wine
-        # launcher while clearly surfacing the potentially better runtime.
-        backend = "wine"
-        recommended_runtime = "Wine (Proton may work better)"
-
+    elif backend_preference != "auto":
+        backend = backend_preference
+        if backend == "proton" and host and host.proton_versions:
+            recommended_runtime = host.proton_versions[0]
+        else:
+            recommended_runtime = "Proton" if backend == "proton" else "Wine"
+    elif category == "game" and proton_available:
+        backend = "proton"
+        selected = host.proton_versions[0] if host and host.proton_versions else "Proton"
+        recommended_runtime = selected
         notes.append(
-            "Game-related imports detected. RunEXE can launch it with Wine; "
-            "Proton may provide better DirectX and Steam integration."
+            "Game-related imports detected; Proton is selected for its DirectX "
+            "translation and game-focused compatibility patches."
         )
-
-    else:
+    elif wine_available:
         backend = "wine"
         recommended_runtime = "Wine"
+        if category == "game":
+            notes.append("Proton may work better for this game, but no installation was detected.")
+    elif proton_available:
+        backend = "proton"
+        selected = host.proton_versions[0] if host and host.proton_versions else "Proton"
+        recommended_runtime = selected
+        notes.append("Wine is unavailable, so Proton is selected as the installed fallback.")
+    else:
+        backend = "wine"
+        recommended_runtime = "Unavailable"
+
+    if backend == "wine" and host is not None and not host.wine_installed:
+        blocking_issues.append("Wine is not installed. Use --backend proton or install Wine.")
+    elif backend == "proton":
+        wine_arch = "win64"
+        if host is not None and not host.proton_installed:
+            blocking_issues.append(
+                "Proton is not installed. Install it through Steam or provide --proton PATH."
+            )
 
     if executable.package is not None:
         package_name = executable.package.display_name or executable.package.identity_name

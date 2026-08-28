@@ -2,6 +2,7 @@ import subprocess
 from unittest.mock import patch
 
 from runexe.models import CompatibilityReport, ExecutableInfo
+from runexe.proton import ProtonInstallation
 from runexe.runner import launch, prefix_path_for, set_windows_version
 
 
@@ -51,3 +52,38 @@ def test_winver_accepts_friendly_and_native_forms(tool, run_progress, tmp_path):
     set_windows_version(tmp_path, "win64", "win10")
 
     assert run_progress.call_args.args[0] == ["winecfg", "-v", "win10"]
+
+
+@patch("runexe.runner.subprocess.run")
+@patch("runexe.runner.ensure_proton_prefix")
+@patch("runexe.runner.select_proton")
+def test_launches_with_selected_proton(select, ensure, run, tmp_path):
+    proton_dir = tmp_path / "Proton Experimental"
+    proton_dir.mkdir()
+    script = proton_dir / "proton"
+    script.touch()
+    installation = ProtonInstallation(
+        "Proton Experimental", script, "experimental", tmp_path / "Steam"
+    )
+    select.return_value = installation
+    run.return_value = subprocess.CompletedProcess([], 0, "played", "")
+    executable_path = tmp_path / "game" / "game.exe"
+    executable_path.parent.mkdir()
+    executable_path.touch()
+    compatibility = report(
+        category="game", backend="proton", recommended_runtime="Proton Experimental"
+    )
+
+    result = launch(
+        ExecutableInfo(executable_path, True),
+        compatibility,
+        prefix=tmp_path / "compatdata",
+        install_dependencies=False,
+        proton="Experimental",
+    )
+
+    assert result.stdout == "played"
+    assert run.call_args.args[0][:2] == [str(script), "run"]
+    assert run.call_args.kwargs["env"]["STEAM_COMPAT_DATA_PATH"] == str(
+        (tmp_path / "compatdata").resolve()
+    )

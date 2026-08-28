@@ -54,8 +54,21 @@ def test_run_forwards_every_argument_after_separator(tmp_path, monkeypatch):
 
     result = runner.invoke(
         app,
-        ["run", str(path), "--no-dependencies", "--", "--portable", "two words"],
+        ["run", str(path), "--no-deps", "--", "--portable", "two words"],
     )
 
     assert result.exit_code == 0
     assert seen["extra_args"] == ["--portable", "two words"]
+
+
+def test_run_rejects_conflicting_runtime_options(tmp_path):
+    path = tmp_path / "app.exe"
+    path.touch()
+
+    result = runner.invoke(
+        app,
+        ["run", str(path), "--backend", "wine", "--proton", "Proton Experimental"],
+    )
+
+    assert result.exit_code == 1
+    assert "cannot be combined" in result.output

@@ -1,4 +1,4 @@
-"""Read-only detection of host capabilities relevant to Wine."""
+"""Read-only detection of host capabilities relevant to Wine and Proton."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 from .models import ExecutableInfo, HostInfo
+from .proton import discover_proton_installations
 
 
 def _normalize_architecture(value: str) -> str:
@@ -90,6 +91,8 @@ def detect_host(executable: ExecutableInfo | None = None) -> HostInfo:
         except (subprocess.TimeoutExpired, OSError):
             pass
 
+    proton_installations = discover_proton_installations()
+
     return HostInfo(
         architecture=architecture,
         wine_installed=wine_installed,
@@ -97,4 +100,6 @@ def detect_host(executable: ExecutableInfo | None = None) -> HostInfo:
         wine_wow64=wine_wow64,
         wine_32bit_prefix=wine_32bit_prefix,
         winetricks_installed=shutil.which("winetricks") is not None,
+        proton_installed=bool(proton_installations),
+        proton_versions=[item.name for item in proton_installations],
     )
