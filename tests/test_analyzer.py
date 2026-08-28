@@ -1,7 +1,9 @@
 import struct
+import zipfile
 
 from runexe.analyzer import analyze_executable
 from runexe.models import PESection
+from runexe.packages import PackageError
 from runexe.pe_utils import rva_range_to_file_offset, rva_to_file_offset
 
 from .helpers import make_pe
@@ -74,3 +76,45 @@ def test_directory_input_requires_exactly_one_executable(tmp_path):
         assert "b.EXE" in str(error)
     else:
         raise AssertionError("Expected directory ambiguity to be rejected")
+
+
+def test_analyzes_msix_manifest_and_declared_executable(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    (source / "PaintApp").mkdir(parents=True)
+    executable = make_pe(source / "PaintApp" / "mspaint.exe")
+    package = tmp_path / "Paint.msix"
+    manifest = """
+    <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+      <Identity Name="Microsoft.Paint" Publisher="CN=Microsoft" Version="11.0.0.0" />
+      <Properties><DisplayName>Paint</DisplayName></Properties>
+      <Applications>
+        <Application Id="Paint" Executable="PaintApp\\mspaint.exe" />
+      </Applications>
+    </Package>
+    """
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.write(executable, "PaintApp/mspaint.exe")
+        archive.writestr("AppxManifest.xml", manifest)
+
+    monkeypatch.setattr("runexe.packages.PACKAGE_CACHE_DIR", tmp_path / "cache")
+    result = analyze_executable(package)
+
+    assert result.valid
+    assert result.path.name == "mspaint.exe"
+    assert result.package.identity_name == "Microsoft.Paint"
+    assert result.package.display_name == "Paint"
+    assert result.package.application_id == "Paint"
+
+
+def test_rejects_path_traversal_in_package_archive(tmp_path, monkeypatch):
+    package = tmp_path / "unsafe.msix"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("../outside.exe", b"not safe")
+
+    monkeypatch.setattr("runexe.packages.PACKAGE_CACHE_DIR", tmp_path / "cache")
+    try:
+        analyze_executable(package)
+    except PackageError as error:
+        assert "Unsafe package path" in str(error)
+    else:
+        raise AssertionError("Expected unsafe package path to be rejected")

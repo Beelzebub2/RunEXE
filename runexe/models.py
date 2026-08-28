@@ -37,6 +37,21 @@ class VersionInfo:
 
 
 @dataclass
+class PackageInfo:
+    """Metadata for an AppX/MSIX package materialized for Wine."""
+
+    source: Path
+    root: Path
+    manifest: Path
+    identity_name: str
+    version: str | None = None
+    publisher: str | None = None
+    display_name: str | None = None
+    application_id: str | None = None
+    package_type: str = "AppX/MSIX"
+
+
+@dataclass
 class ExecutableInfo:
     path: Path
     valid: bool
@@ -49,6 +64,7 @@ class ExecutableInfo:
     imports: list[PEImport] | None = None
     manifest: str | None = None
     version_info: VersionInfo | None = None
+    package: PackageInfo | None = None
 
 
 @dataclass(frozen=True)

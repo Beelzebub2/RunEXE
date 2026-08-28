@@ -8,6 +8,7 @@ from typing import BinaryIO
 
 from .constants import IMAGE_DIRECTORY_ENTRY_IMPORT, IMAGE_DIRECTORY_ENTRY_RESOURCE, SUBSYSTEM_TYPES
 from .models import ExecutableInfo, PEDataDirectory, PEImport, PESection
+from .packages import resolve_input
 from .pe_utils import rva_to_file_offset
 from .resources import extract_manifest, extract_version_info
 
@@ -214,9 +215,12 @@ def _select_executable(path: Path) -> Path:
 
 
 def analyze_executable(file_path: str | Path) -> ExecutableInfo:
-    """Analyze one PE executable without executing it or modifying the host."""
+    """Analyze a PE executable or materialize an AppX/MSIX package for inspection."""
 
-    path = _select_executable(Path(file_path))
+    input_path = Path(file_path)
+    path, package = resolve_input(input_path)
+    if package is None:
+        path = _select_executable(path)
     file_size = path.stat().st_size
     if file_size < 64:
         return _invalid(path, "File is too small to contain a valid DOS header")
@@ -316,4 +320,5 @@ def analyze_executable(file_path: str | Path) -> ExecutableInfo:
         imports=imports,
         manifest=manifest,
         version_info=version_info,
+        package=package,
     )

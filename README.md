@@ -2,6 +2,8 @@
 
 Analyze Windows executables and run them on Linux through Wine - with automatic compatibility detection, anti-cheat warnings, and dependency provisioning.
 
+![RunEXE logo](assets/runexe-logo.png)
+
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![License](https://img.shields.io/badge/license-LGPL--2.1-green) ![Status](https://img.shields.io/badge/status-alpha-orange)
 
 RunEXE inspects a Windows `.exe` (architecture, imports, subsystem, embedded manifest, version info, .NET/CLR header) and turns that into a concrete compatibility report: which backend to use, which Winetricks dependencies to install, and any known blockers (like kernel-level anti-cheat) before you ever try to launch it. Point it at a prefix-less executable and it'll create the Wine prefix, install what's needed, and run it - no manual `winecfg` required for straightforward apps.
@@ -20,6 +22,7 @@ More compatibility data is one of the long-term goals of the project (see [Roadm
 ## 🚀 Features
 
 - **Defensive PE analysis** - bounded, read-only parsing of file-backed PE data (Wine is not required)
+- **AppX/MSIX support** - extracts trusted package archives, reads `AppxManifest.xml`, and finds the declared application executable
 - **Architecture detection** - x86 / x86_64 / ARM64, mapped to the correct `WINEARCH`
 - **Import table analysis** - full DLL + function listing (`--imports`)
 - **Subsystem parsing** - Windows GUI vs. Console vs. others
@@ -33,6 +36,7 @@ More compatibility data is one of the long-term goals of the project (see [Roadm
 - **Wine prefix management** - creates and reuses a stable, per-app prefix automatically
 - **Winetricks integration** - installs required runtimes (VC++ redistributables, D3D compiler/extension libs, OpenAL, .NET Framework) before launch
 - **Native Wine execution** - launches from the application directory and preserves arguments, stdout, stderr, timeouts, and exit codes
+- **Polished terminal UI** - readable panels, tables, status colors, and a compact RunEXE prompt mark
 - **Automation-friendly reports** - emits the full analysis and compatibility result as JSON
 
 ## 📋 Requirements
@@ -58,6 +62,15 @@ This installs the `runexe` command via [Typer](https://typer.tiangolo.com/).
 
 ```bash
 runexe analyze path/to/app.exe
+```
+
+AppX/MSIX packages and unpacked package directories are also supported. RunEXE
+reads the package manifest, safely materializes the declared executable, and
+launches that executable directly through Wine:
+
+```bash
+runexe analyze Paint.msix
+runexe run Paint.msix --no-dependencies
 ```
 
 Add `--imports` / `-i` to list every imported function per DLL, not just counts:
@@ -141,6 +154,8 @@ runexe version
 
 - RunEXE does not modify the analyzed executable in any way - analysis is read-only.
 - `runexe analyze` does not initialize Wine prefixes or otherwise mutate Wine state.
+- AppX/MSIX archives are extracted into `$XDG_CACHE_HOME/runexe/packages` (or `~/.cache/runexe/packages`) for reuse. Package signatures are not verified; only run packages you trust.
+- Package identity and Microsoft Store services are not recreated. Classic Win32 applications distributed inside AppX/MSIX may work, while UWP/Store-only features may still fail under Wine.
 - Wine is a compatibility layer, **not a security sandbox**. Only run executables you trust; use a VM or a dedicated sandbox for untrusted software.
 - Anti-cheat detection is a best-effort signal based on known import names (see `constants.py`); it is not exhaustive and deliberately does not attempt to detect wrapper/VM-based DRM such as Denuvo. [Proton support for EAC and BattlEye is enabled per title](https://partner.steamgames.com/doc/steamhardware/proton), so these detections are warnings rather than automatic blockers.
 - Game detection is heuristic. Until Proton provisioning is implemented, RunEXE launches supported games with Wine while noting that Proton may work better.

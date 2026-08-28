@@ -398,12 +398,25 @@ def analyze_compatibility(
         backend = "wine"
         recommended_runtime = "Wine"
 
+    if executable.package is not None:
+        package_name = executable.package.display_name or executable.package.identity_name
+        notes.append(
+            f"Packaged app detected: {package_name}. RunEXE will launch its declared "
+            "executable directly; Windows Store/UWP package identity is not recreated."
+        )
+        warnings = [
+            "This package may depend on Windows Store services or package identity that "
+            "Wine cannot provide.",
+        ]
+    else:
+        warnings = []
+
     # ---------------------------------------------------------
     # Anti-cheat / DRM. EAC and BattlEye can work in Proton when a game
     # publisher enables support, so an import alone is not a hard blocker.
     # ---------------------------------------------------------
 
-    warnings = detect_anti_cheat_warnings(executable)
+    warnings.extend(detect_anti_cheat_warnings(executable))
 
     # ---------------------------------------------------------
     # .NET detection

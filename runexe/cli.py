@@ -15,6 +15,15 @@ from runexe.compatibility import analyze_compatibility
 from runexe.host import detect_host
 from runexe.resources import extract_requested_execution_level
 from runexe.runner import LaunchResult, RunnerError, launch
+from runexe.ui import (
+    console,
+    print_banner,
+    print_error,
+    print_section,
+    print_success,
+    print_summary,
+    print_warning,
+)
 
 app = typer.Typer(
     name="runexe",
@@ -25,7 +34,7 @@ app = typer.Typer(
 
 
 def _error(message: str) -> None:
-    typer.echo(f"Error: {message}", err=True)
+    print_error(message)
 
 
 def _analysis_as_dict(result, compatibility, host) -> dict:
@@ -39,7 +48,7 @@ def _analysis_as_dict(result, compatibility, host) -> dict:
 @app.command()
 def analyze(
     file: Annotated[
-        Path, typer.Argument(help="Executable file, or a directory containing one .exe.")
+        Path, typer.Argument(help="PE executable, AppX/MSIX package, or package directory.")
     ],
     imports: Annotated[
         bool, typer.Option("--imports", "-i", help="List imported functions, not only DLL counts.")
@@ -57,7 +66,7 @@ def analyze(
         result = analyze_executable(file)
         if not result.valid:
             if json_output:
-                typer.echo(json.dumps(_analysis_as_dict(result, None, None), indent=2))
+                typer.echo(json.dumps(_analysis_as_dict(result, None, None), indent=2, default=str))
             else:
                 typer.echo(f"File: {result.path}")
                 typer.echo("Format: Invalid")
@@ -68,14 +77,28 @@ def analyze(
         compatibility = analyze_compatibility(result, host)
 
         if json_output:
-            typer.echo(json.dumps(_analysis_as_dict(result, compatibility, host), indent=2))
+            typer.echo(
+                json.dumps(_analysis_as_dict(result, compatibility, host), indent=2, default=str)
+            )
             return
 
-        typer.echo(f"File: {result.path}")
-        typer.echo(f"Format: {result.format}")
-        typer.echo(f"Architecture: {result.architecture}")
+        print_banner("Static analysis - no Wine changes")
+        summary_rows = [
+            ("File", result.path),
+            ("Format", result.format),
+            ("Architecture", result.architecture),
+        ]
         if result.subsystem:
-            typer.echo(f"Subsystem: {result.subsystem}")
+            summary_rows.append(("Subsystem", result.subsystem))
+        if result.package:
+            summary_rows.extend(
+                [
+                    ("Package", result.package.display_name or result.package.identity_name),
+                    ("Package version", result.package.version or "unknown"),
+                    ("Package app", result.package.application_id or "default"),
+                ]
+            )
+        print_summary("Executable", summary_rows)
 
         if result.version_info:
             product_name = result.version_info.strings.get("ProductName")
@@ -94,7 +117,7 @@ def analyze(
             typer.echo(f"Manifest: Present{suffix}")
 
         if result.sections:
-            typer.echo("\nSections:")
+            print_section("Sections")
             for section in result.sections:
                 typer.echo(
                     f"  {section.name:<8} RVA=0x{section.virtual_address:08X} "
@@ -103,7 +126,7 @@ def analyze(
                 )
 
         if result.imports:
-            typer.echo("\nImports:")
+            print_section("Imports")
             for imported in result.imports:
                 if imports:
                     typer.echo(f"  {imported.name}")
@@ -114,35 +137,40 @@ def analyze(
                     unit = "function" if count == 1 else "functions"
                     typer.echo(f"  {imported.name:<24} ({count} {unit})")
             if not imports:
-                typer.echo("\n(use --imports/-i to list every imported function)")
+                console.print("\n[dim](use --imports/-i to list every imported function)[/dim]")
 
-        typer.echo("\nCompatibility:")
-        typer.echo(f"  Application type: {compatibility.application_type}")
-        typer.echo(f"  Category: {compatibility.category}")
-        typer.echo(f"  Recommended runtime: {compatibility.recommended_runtime}")
-        typer.echo(f"  Architecture: {compatibility.architecture}")
-        typer.echo(f"  WINEARCH: {compatibility.wine_arch or 'N/A'}")
-        typer.echo(f"  Supported architecture: {'Yes' if compatibility.supported else 'No'}")
+        print_summary(
+            "Compatibility",
+            [
+                ("Application type", compatibility.application_type),
+                ("Category", compatibility.category),
+                ("Recommended runtime", compatibility.recommended_runtime),
+                ("Architecture", compatibility.architecture),
+                ("WINEARCH", compatibility.wine_arch or "N/A"),
+                ("Supported", "Yes" if compatibility.supported else "No"),
+            ],
+        )
 
         if compatibility.blocking_issues:
-            typer.echo("\nBlocking issues:")
+            print_section("Blocking issues")
             for issue in compatibility.blocking_issues:
-                typer.echo(f"  - {issue}")
+                console.print(f"  [bright_red]-[/bright_red] {issue}")
         if compatibility.warnings:
-            typer.echo("\nCompatibility warnings:")
+            print_section("Compatibility warnings")
             for warning in compatibility.warnings:
-                typer.echo(f"  - {warning}")
+                print_warning(warning)
         if compatibility.required_verbs:
-            typer.echo("\nSuggested provisioning:")
-            typer.echo("  winetricks " + " ".join(compatibility.required_verbs))
+            print_section("Suggested provisioning")
+            command = " ".join(compatibility.required_verbs)
+            console.print(f"  [bright_cyan]winetricks[/bright_cyan] {command}")
         if compatibility.notes:
-            typer.echo("\nNotes:")
+            print_section("Notes")
             for note in compatibility.notes:
-                typer.echo(f"  - {note}")
+                console.print(f"  [bright_black]-[/bright_black] {note}")
         if compatibility.dependencies:
-            typer.echo("\nDetected dependencies:")
+            print_section("Detected dependencies")
             for dependency in compatibility.dependencies:
-                typer.echo(
+                console.print(
                     f"  {dependency.name} ({dependency.category}, "
                     f"{dependency.confidence} confidence)"
                 )
@@ -158,7 +186,7 @@ def analyze(
 def run(
     ctx: typer.Context,
     file: Annotated[
-        Path, typer.Argument(help="Executable file, or a directory containing one .exe.")
+        Path, typer.Argument(help="PE executable, AppX/MSIX package, or package directory.")
     ],
     timeout: Annotated[
         int | None, typer.Option("--timeout", min=1, help="Maximum runtime in seconds.")
@@ -192,17 +220,30 @@ def run(
             raise RunnerError(result.reason or "Invalid Windows executable")
         compatibility = analyze_compatibility(result, detect_host())
 
-        typer.echo(f"Launching {result.path.name} ({compatibility.recommended_runtime})...")
+        print_banner(f"Launch - {result.path.name}")
+        print_summary(
+            "Launch plan",
+            [
+                ("Runtime", compatibility.recommended_runtime),
+                ("Architecture", compatibility.architecture),
+                ("WINEARCH", compatibility.wine_arch or "N/A"),
+                ("Dependencies", ", ".join(compatibility.required_verbs) or "none detected"),
+            ],
+        )
         for warning in compatibility.warnings:
-            typer.echo(f"Warning: {warning}", err=True)
+            print_warning(warning)
         if verbose:
-            typer.echo("\nLaunch details:")
-            typer.echo(f"  Executable architecture: {result.architecture}")
-            typer.echo(f"  WINEARCH: {compatibility.wine_arch or 'N/A'}")
+            print_summary(
+                "Launch details",
+                [
+                    ("Executable architecture", result.architecture),
+                    ("WINEARCH", compatibility.wine_arch or "N/A"),
+                ],
+            )
         if dependencies and compatibility.required_verbs:
-            typer.echo("Installing dependencies: " + ", ".join(compatibility.required_verbs))
+            console.print("Installing dependencies: " + ", ".join(compatibility.required_verbs))
         elif not dependencies and compatibility.required_verbs:
-            typer.echo("Skipping detected dependencies (--no-dependencies).")
+            console.print("Skipping detected dependencies (--no-dependencies).")
 
         launch_result: LaunchResult = launch(
             result,
@@ -216,9 +257,14 @@ def run(
         )
 
         if launch_result.stdout:
-            typer.echo(launch_result.stdout, nl=not launch_result.stdout.endswith("\n"))
+            stdout_end = "" if launch_result.stdout.endswith("\n") else "\n"
+            console.print(launch_result.stdout, end=stdout_end)
         if launch_result.stderr:
-            typer.echo(launch_result.stderr, err=True, nl=not launch_result.stderr.endswith("\n"))
+            console.print(
+                launch_result.stderr,
+                end="" if launch_result.stderr.endswith("\n") else "\n",
+                stderr=True,
+            )
         if launch_result.timed_out:
             _error(f"Process exceeded the {timeout}-second timeout.")
             raise typer.Exit(code=124)
@@ -226,7 +272,7 @@ def run(
             _error(f"Process exited with code {launch_result.exit_code}.")
             code = launch_result.exit_code or 1
             raise typer.Exit(code=code if 1 <= code <= 255 else 1)
-        typer.echo("Exited normally.")
+        print_success("Exited normally.")
 
     except typer.Exit:
         raise
