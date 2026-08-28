@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -35,6 +37,21 @@ class VersionInfo:
 
 
 @dataclass
+class PackageInfo:
+    """Metadata for an AppX/MSIX package materialized for Wine."""
+
+    source: Path
+    root: Path
+    manifest: Path
+    identity_name: str
+    version: str | None = None
+    publisher: str | None = None
+    display_name: str | None = None
+    application_id: str | None = None
+    package_type: str = "AppX/MSIX"
+
+
+@dataclass
 class ExecutableInfo:
     path: Path
     valid: bool
@@ -47,6 +64,17 @@ class ExecutableInfo:
     imports: list[PEImport] | None = None
     manifest: str | None = None
     version_info: VersionInfo | None = None
+    package: PackageInfo | None = None
+
+
+@dataclass(frozen=True)
+class Dependency:
+    """A runtime or Windows component detected from an executable."""
+
+    name: str
+    category: str
+    confidence: str = "high"
+    winetricks_verb: str | None = None
 
 
 @dataclass
@@ -65,6 +93,9 @@ class CompatibilityReport:
     # backend (e.g. kernel-level anti-cheat), separate from `notes`
     # so callers can act on this without parsing free text.
     blocking_issues: list[str] = field(default_factory=list)
+    # Important but non-deterministic compatibility concerns, such as
+    # per-title anti-cheat enablement.
+    warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     # Winetricks verbs (e.g. "vcrun2015", "dotnet48") that should be
     # installed into the prefix before launch, inferred from imports
@@ -74,20 +105,14 @@ class CompatibilityReport:
 
 
 @dataclass
-class Dependency:
-    """A runtime or Windows component detected from an executable."""
-
-    name: str
-    category: str
-    confidence: str = "high"
-    winetricks_verb: str | None = None
-
-
-@dataclass
 class HostInfo:
     architecture: str
     wine_installed: bool
     wine_version: str | None
-    wine_wow64: bool
-    wine_32bit_prefix: bool
+    # None means that read-only inspection could not prove support either
+    # way. Prefix creation performs the definitive capability check.
+    wine_wow64: bool | None
+    wine_32bit_prefix: bool | None
     winetricks_installed: bool
+    proton_installed: bool = False
+    proton_versions: list[str] = field(default_factory=list)

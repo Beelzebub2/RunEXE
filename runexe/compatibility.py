@@ -9,27 +9,21 @@ from runexe.constants import (
     WINE_ARCH_BY_ARCHITECTURE,
 )
 from runexe.dependencies import (
-    DOTNET_VERB, 
-    detect_dependencies, 
+    DOTNET_VERB,
+    detect_dependencies,
     resolve_verbs_for_dependencies,
 )
 from runexe.models import (
     CompatibilityReport,
+    Dependency,
     ExecutableInfo,
     HostInfo,
-    Dependency,
 )
 from runexe.resources import extract_requested_execution_level
 
 
-def detect_blocking_issues(executable: ExecutableInfo) -> list[str]:
-    """Return a list of detected reasons this executable is unlikely to
-    run under Wine/Proton at all, regardless of backend choice.
-
-    Currently checks imported DLL names against known anti-cheat
-    clients. See the comment above ANTI_CHEAT_DLLS in constants.py for
-    what this deliberately does not attempt to detect (e.g. Denuvo).
-    """
+def detect_anti_cheat_warnings(executable: ExecutableInfo) -> list[str]:
+    """Return per-title compatibility warnings for known anti-cheat clients."""
 
     if not executable.imports:
         return []
@@ -44,8 +38,8 @@ def detect_blocking_issues(executable: ExecutableInfo) -> list[str]:
             detected_products.add(product)
 
     return [
-        f"{product} anti-cheat detected: this application is very "
-        f"unlikely to run under Wine or Proton."
+        f"{product} anti-cheat detected. Proton support is configured per title; "
+        f"verify this game's current compatibility before launching."
         for product in sorted(detected_products)
     ]
 
@@ -64,17 +58,37 @@ def classify_application(executable: ExecutableInfo) -> str:
     if not executable.imports:
         return "application"
 
-    imported_names = {
-        imported.name.lower() for imported in executable.imports
-    }
+    imported_names = {imported.name.lower() for imported in executable.imports}
 
     if imported_names & STEAM_API_DLLS:
         return "game"
 
-    if imported_names & GAME_SIGNAL_DLLS:
+    # UnityPlayer is an engine runtime and is a strong signal on its own.
+    # Generic D3D/XInput imports are also used by browsers, CAD tools and
+    # media applications, so require at least two independent weak signals.
+    game_signals = imported_names & GAME_SIGNAL_DLLS
+    if "unityplayer.dll" in game_signals or len(game_signals) >= 2:
         return "game"
 
     return "application"
+
+
+def _find_runtimeconfig(executable_path: Path) -> Path | None:
+    expected_name = f"{executable_path.stem}.runtimeconfig.json".lower()
+    direct = executable_path.with_name(f"{executable_path.stem}.runtimeconfig.json")
+    if direct.is_file():
+        return direct
+    try:
+        return next(
+            (
+                item
+                for item in executable_path.parent.iterdir()
+                if item.is_file() and item.name.lower() == expected_name
+            ),
+            None,
+        )
+    except OSError:
+        return None
 
 
 def detect_apphost_dotnet(executable_path: Path) -> bool:
@@ -95,22 +109,7 @@ def detect_apphost_dotnet(executable_path: Path) -> bool:
     (e.g. scanning for an embedded PE resource).
     """
 
-    runtimeconfig = executable_path.with_suffix(".runtimeconfig.json")
-
-    if runtimeconfig.exists():
-        return True
-
-    # Publish tooling doesn't always preserve exact case on
-    # case-sensitive filesystems; fall back to a case-insensitive
-    # sibling scan before giving up.
-    stem_lower = executable_path.stem.lower()
-
-    return any(
-        sibling.stem.lower() == stem_lower
-        and sibling.suffix.lower() == ".json"
-        and sibling.name.lower().endswith("runtimeconfig.json")
-        for sibling in executable_path.parent.glob("*.json")
-    )
+    return _find_runtimeconfig(executable_path) is not None
 
 
 def detect_apphost_dotnet_version(
@@ -130,31 +129,23 @@ def detect_apphost_dotnet_version(
     doesn't contain a usable framework entry.
     """
 
-    runtimeconfig = executable_path.with_suffix(
-        ".runtimeconfig.json"
-    )
+    version, is_desktop, _self_contained = _detect_apphost_dotnet_details(executable_path)
+    return version, is_desktop
 
-    if not runtimeconfig.exists():
-        stem_lower = executable_path.stem.lower()
 
-        runtimeconfig = next(
-            (
-                sibling
-                for sibling in executable_path.parent.glob("*.json")
-                if (
-                    sibling.stem.lower() == stem_lower
-                    and sibling.name.lower().endswith(
-                        "runtimeconfig.json"
-                    )
-                )
-            ),
-            None,
-        )
+def _detect_apphost_dotnet_details(
+    executable_path: Path,
+) -> tuple[str | None, bool, bool]:
+    """Return version, desktop-runtime flag, and self-contained flag."""
+
+    runtimeconfig = _find_runtimeconfig(executable_path)
 
     if runtimeconfig is None:
-        return None, False
+        return None, False, False
 
     try:
+        if runtimeconfig.stat().st_size > 1024 * 1024:
+            return None, False, False
         # dotnet publish emits runtimeconfig.json with a UTF-8 BOM in
         # some SDK versions (confirmed on a real Paint.NET 5.x publish);
         # utf-8-sig strips it if present and behaves like plain utf-8
@@ -165,9 +156,13 @@ def detect_apphost_dotnet_version(
         ) as file:
             data = json.load(file)
     except (OSError, json.JSONDecodeError):
-        return None, False
+        return None, False, False
 
+    if not isinstance(data, dict):
+        return None, False, False
     runtime_options = data.get("runtimeOptions", {})
+    if not isinstance(runtime_options, dict):
+        return None, False, False
 
     framework = runtime_options.get("framework")
 
@@ -178,6 +173,7 @@ def detect_apphost_dotnet_version(
             return (
                 version,
                 framework.get("name") == "Microsoft.WindowsDesktop.App",
+                False,
             )
 
     def _pick_desktop_or_core(
@@ -223,7 +219,7 @@ def detect_apphost_dotnet_version(
         version, is_desktop = _pick_desktop_or_core(frameworks)
 
         if version is not None:
-            return version, is_desktop
+            return version, is_desktop, False
 
     # "includedFrameworks": self-contained publishes, where every
     # framework version bundled with the app is listed here instead
@@ -235,9 +231,9 @@ def detect_apphost_dotnet_version(
         version, is_desktop = _pick_desktop_or_core(included_frameworks)
 
         if version is not None:
-            return version, is_desktop
+            return version, is_desktop, True
 
-    return None, False
+    return None, False, False
 
 
 def dotnet_version_to_verb(
@@ -265,6 +261,7 @@ def dotnet_version_to_verb(
     major_minor = f"{parts[0]}.{parts[1]}"
 
     desktop_version_to_verb = {
+        "3.1": "dotnetcoredesktop3",
         "6.0": "dotnetdesktop6",
         "7.0": "dotnetdesktop7",
         "8.0": "dotnetdesktop8",
@@ -273,14 +270,15 @@ def dotnet_version_to_verb(
     }
 
     runtime_version_to_verb = {
+        "3.1": "dotnetcore3",
+        "6.0": "dotnet6",
+        "7.0": "dotnet7",
         "8.0": "dotnet8",
         "9.0": "dotnet9",
         "10.0": "dotnet10",
     }
 
-    verb_map = (
-        desktop_version_to_verb if is_desktop else runtime_version_to_verb
-    )
+    verb_map = desktop_version_to_verb if is_desktop else runtime_version_to_verb
 
     return verb_map.get(major_minor)
 
@@ -288,79 +286,51 @@ def dotnet_version_to_verb(
 def analyze_compatibility(
     executable: ExecutableInfo,
     host: HostInfo | None = None,
+    backend_preference: str = "auto",
 ) -> CompatibilityReport:
-
+    if backend_preference not in {"auto", "wine", "proton"}:
+        raise ValueError(f"Unknown backend preference: {backend_preference}")
     notes = []
 
     # Determine application architecture.
     architecture = executable.architecture or "Unknown"
 
     if architecture == "x86":
-        notes.append(
-            "32-bit Windows executable detected."
-        )
+        notes.append("32-bit Windows executable detected.")
 
     elif architecture == "x86_64":
-        notes.append(
-            "64-bit Windows executable detected."
-        )
+        notes.append("64-bit Windows executable detected.")
 
     elif architecture == "ARM64":
-        notes.append(
-            "Windows ARM64 executable detected."
-        )
+        notes.append("Windows ARM64 executable detected.")
 
     else:
-        notes.append(
-            "Unknown executable architecture."
-        )
+        notes.append("Unknown executable architecture.")
 
     # Map the architecture to a WINEARCH value.
     if architecture == "x86":
         if host is not None and host.wine_32bit_prefix:
             wine_arch = "win32"
-
-            notes.append(
-                "32-bit Windows executable detected."
-            )
-            notes.append(
-                "Traditional 32-bit Wine prefix support is available."
-            )
+            notes.append("Traditional 32-bit Wine prefix support is available.")
             supported = True
 
         elif host is not None and host.wine_wow64:
             wine_arch = "win64"
 
-            notes.append(
-                "Wine WoW64 support detected."
-            )
-            notes.append(
-                "The application will run through a 64-bit Wine prefix."
-            )
+            notes.append("Wine WoW64 support detected.")
+            notes.append("The application will run through a 64-bit Wine prefix.")
             supported = True
 
         else:
-            wine_arch = None
-            supported = False
-
+            # Read-only inspection cannot conclusively detect every modern
+            # unified-WoW64 layout. Choose the appropriate prefix and let
+            # wineboot provide the definitive check during launch.
+            wine_arch = "win64" if host and host.architecture == "x86_64" else "win32"
+            supported = True
             notes.append(
-                "32-bit Windows executable detected."
+                "32-bit Wine capability could not be verified without creating "
+                "a prefix; it will be validated during launch."
             )
-
-            if host is None:
-                notes.append(
-                    "Could not determine 32-bit/WoW64 Wine support "
-                    "without host information."
-                )
-            else:
-                notes.append(
-                    "Neither a traditional 32-bit Wine prefix nor WoW64 "
-                    "support is available."
-                )
-                notes.append(
-                    "Install Wine with 32-bit/multilib support to run "
-                    "32-bit Windows applications."
-                )
 
     else:
         # x86 is fully handled above; WINE_ARCH_BY_ARCHITECTURE only
@@ -369,15 +339,12 @@ def analyze_compatibility(
         supported = wine_arch is not None
 
         if wine_arch is None:
-            notes.append(
-                "Could not determine a WINEARCH value for this "
-                "architecture."
-            )
+            notes.append("Could not determine a WINEARCH value for this architecture.")
 
     if architecture == "ARM64":
         notes.append(
-            "ARM64 Windows applications are not supported: "
-            "Wine and Proton cannot run Windows-on-ARM binaries."
+            "ARM64 Windows applications are not supported by RunEXE's "
+            "current x86/x86_64 Wine backend."
         )
 
     # ---------------------------------------------------------
@@ -387,38 +354,24 @@ def analyze_compatibility(
     blocking_issues = []
 
     if host is not None:
-        notes.append(
-            f"Host architecture: {host.architecture}"
-        )
+        notes.append(f"Host architecture: {host.architecture}")
 
         if architecture == "x86_64":
             if host.architecture != "x86_64":
                 supported = False
-                blocking_issues.append(
-                    "This executable requires an x86_64 host."
-                )
+                blocking_issues.append("This executable requires an x86_64 host.")
 
         elif architecture == "x86":
             if host.architecture not in {"x86", "x86_64"}:
                 supported = False
-                blocking_issues.append(
-                    "This executable requires an x86-compatible host."
-                )
+                blocking_issues.append("This executable requires an x86-compatible host.")
 
-        # Wine availability
-        if not host.wine_installed:
-            blocking_issues.append(
-                "Wine is not installed."
+        if host.wine_installed:
+            notes.append(
+                f"Wine detected: {host.wine_version}" if host.wine_version else "Wine is installed."
             )
-        else:
-            if host.wine_version:
-                notes.append(
-                    f"Wine detected: {host.wine_version}"
-                )
-            else:
-                notes.append(
-                    "Wine is installed."
-                )
+        if host.proton_installed:
+            notes.append("Proton detected: " + ", ".join(host.proton_versions))
 
     # ---------------------------------------------------------
     # Classify as game vs. application
@@ -426,31 +379,68 @@ def analyze_compatibility(
 
     category = classify_application(executable)
 
+    wine_available = host is None or host.wine_installed
+    proton_available = host is None or host.proton_installed
+
     if not supported:
         backend = "unsupported"
         recommended_runtime = "Unsupported"
-
-    elif category == "game":
+    elif backend_preference != "auto":
+        backend = backend_preference
+        if backend == "proton" and host and host.proton_versions:
+            recommended_runtime = host.proton_versions[0]
+        else:
+            recommended_runtime = "Proton" if backend == "proton" else "Wine"
+    elif category == "game" and proton_available:
         backend = "proton"
-        recommended_runtime = "Proton (Steam Play)"
-
+        selected = host.proton_versions[0] if host and host.proton_versions else "Proton"
+        recommended_runtime = selected
         notes.append(
-            "Game-related imports detected; Proton is recommended "
-            "over plain Wine for DirectX translation and Steam "
-            "integration."
+            "Game-related imports detected; Proton is selected for its DirectX "
+            "translation and game-focused compatibility patches."
         )
-
-    else:
+    elif wine_available:
         backend = "wine"
         recommended_runtime = "Wine"
+        if category == "game":
+            notes.append("Proton may work better for this game, but no installation was detected.")
+    elif proton_available:
+        backend = "proton"
+        selected = host.proton_versions[0] if host and host.proton_versions else "Proton"
+        recommended_runtime = selected
+        notes.append("Wine is unavailable, so Proton is selected as the installed fallback.")
+    else:
+        backend = "wine"
+        recommended_runtime = "Unavailable"
+
+    if backend == "wine" and host is not None and not host.wine_installed:
+        blocking_issues.append("Wine is not installed. Use --backend proton or install Wine.")
+    elif backend == "proton":
+        wine_arch = "win64"
+        if host is not None and not host.proton_installed:
+            blocking_issues.append(
+                "Proton is not installed. Install it through Steam or provide --proton PATH."
+            )
+
+    if executable.package is not None:
+        package_name = executable.package.display_name or executable.package.identity_name
+        notes.append(
+            f"Packaged app detected: {package_name}. RunEXE will launch its declared "
+            "executable directly; Windows Store/UWP package identity is not recreated."
+        )
+        warnings = [
+            "This package may depend on Windows Store services or package identity that "
+            "Wine cannot provide.",
+        ]
+    else:
+        warnings = []
 
     # ---------------------------------------------------------
-    # Anti-cheat / DRM
+    # Anti-cheat / DRM. EAC and BattlEye can work in Proton when a game
+    # publisher enables support, so an import alone is not a hard blocker.
     # ---------------------------------------------------------
 
-    blocking_issues.extend(
-        detect_blocking_issues(executable)
-    )
+    warnings.extend(detect_anti_cheat_warnings(executable))
 
     # ---------------------------------------------------------
     # .NET detection
@@ -461,17 +451,11 @@ def analyze_compatibility(
 
     if (
         executable.data_directories
-        and len(executable.data_directories)
-        > IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR
+        and len(executable.data_directories) > IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR
     ):
-        clr_directory = executable.data_directories[
-            IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR
-        ]
+        clr_directory = executable.data_directories[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR]
 
-        if (
-            clr_directory.virtual_address != 0
-            and clr_directory.size != 0
-        ):
+        if clr_directory.virtual_address != 0 and clr_directory.size != 0:
             is_dotnet = True
 
     if not is_dotnet and detect_apphost_dotnet(executable.path):
@@ -480,24 +464,25 @@ def analyze_compatibility(
 
     dotnet_version = None
     dotnet_is_desktop = False
+    dotnet_self_contained = False
 
     # Determine application type.
     if is_dotnet:
         application_type = ".NET"
 
         if is_dotnet_apphost:
-            dotnet_version, dotnet_is_desktop = detect_apphost_dotnet_version(
-                executable.path
-            )
+            (
+                dotnet_version,
+                dotnet_is_desktop,
+                dotnet_self_contained,
+            ) = _detect_apphost_dotnet_details(executable.path)
             notes.append(
                 "Modern .NET apphost detected via runtimeconfig.json "
                 "(no CLR Runtime Header present -- this is a native "
                 "launcher stub, not a managed executable)."
             )
         else:
-            notes.append(
-                "CLR Runtime Header detected."
-            )
+            notes.append("CLR Runtime Header detected.")
 
     else:
         application_type = "Native Windows"
@@ -506,9 +491,7 @@ def analyze_compatibility(
     # Dependencies
     # ---------------------------------------------------------
 
-    dependencies = detect_dependencies(
-        executable.imports or []
-    )
+    dependencies = detect_dependencies(executable.imports or [])
 
     # .NET is detected structurally through the CLR Runtime Header,
     # rather than through an imported DLL.
@@ -523,13 +506,16 @@ def analyze_compatibility(
                 )
             )
         else:
-            verb = dotnet_version_to_verb(
-                dotnet_version, dotnet_is_desktop
+            verb = (
+                None
+                if dotnet_self_contained
+                else dotnet_version_to_verb(dotnet_version, dotnet_is_desktop)
             )
 
             if dotnet_version is not None:
                 kind = "Desktop" if dotnet_is_desktop else "Runtime"
-                name = f".NET {dotnet_version} ({kind} apphost)"
+                distribution = "self-contained" if dotnet_self_contained else "apphost"
+                name = f".NET {dotnet_version} ({kind}, {distribution})"
             else:
                 name = ".NET apphost (version unknown)"
 
@@ -537,12 +523,17 @@ def analyze_compatibility(
                 Dependency(
                     name=name,
                     category="runtime",
-                    confidence="high" if verb else "low",
+                    confidence="high" if verb or dotnet_self_contained else "low",
                     winetricks_verb=verb,
                 )
             )
 
-            if verb is None:
+            if dotnet_self_contained:
+                notes.append(
+                    "The .NET runtime is bundled with this self-contained application; "
+                    "no shared .NET runtime will be installed."
+                )
+            elif verb is None:
                 notes.append(
                     "Could not determine the Winetricks verb for this "
                     "app's .NET runtime from runtimeconfig.json; "
@@ -551,47 +542,29 @@ def analyze_compatibility(
                     + " manually."
                 )
 
-        # DXVK is only relevant to apps that actually render something;
-        # a headless .NET console tool has no use for it. Gated on
-        # subsystem rather than added unconditionally for every .NET
-        # app. Might still be removed later if this proves too broad
-        # (e.g. GUI apps that are pure business/CRUD with no graphics).
-        if executable.subsystem == "Windows GUI":
-            dependencies.append(
-                Dependency(
-                    name="DXVK (DirectX-to-Vulkan, common .NET/WPF requirement)",
-                    category="graphics",
-                    confidence="medium",
-                    winetricks_verb="dxvk",
-                )
-            )
+    required_verbs = resolve_verbs_for_dependencies(dependencies)
 
-    required_verbs = resolve_verbs_for_dependencies(
-        dependencies
-    )
+    if required_verbs and host is not None and not host.winetricks_installed:
+        notes.append(
+            "Winetricks is not installed, so automatic dependency provisioning is unavailable."
+        )
 
     # ---------------------------------------------------------
     # Subsystem
     # ---------------------------------------------------------
 
     if executable.subsystem == "Windows Console":
-        notes.append(
-            "Console application; a terminal window will be used."
-        )
+        notes.append("Console application; a terminal window will be used.")
 
     elif executable.subsystem == "Windows GUI":
-        notes.append(
-            "Windows GUI application."
-        )
+        notes.append("Windows GUI application.")
 
     # ---------------------------------------------------------
     # Manifest
     # ---------------------------------------------------------
 
     if executable.manifest:
-        execution_level = extract_requested_execution_level(
-            executable.manifest
-        )
+        execution_level = extract_requested_execution_level(executable.manifest)
 
         if execution_level == "requireAdministrator":
             notes.append(
@@ -608,6 +581,7 @@ def analyze_compatibility(
         wine_arch=wine_arch,
         supported=supported,
         blocking_issues=blocking_issues,
+        warnings=warnings,
         notes=notes,
         dependencies=dependencies,
         required_verbs=required_verbs,

@@ -1,601 +1,312 @@
-from pathlib import Path
-import struct
-import os
+"""Defensive, dependency-free parsing of Windows PE executables."""
 
-from .models import (
-    ExecutableInfo,
-    PEDataDirectory,
-    PEImport,
-    PESection,)
-from .constants import (
-    IMAGE_DIRECTORY_ENTRY_IMPORT,
-    IMAGE_DIRECTORY_ENTRY_RESOURCE,
-    SUBSYSTEM_TYPES,)
+from __future__ import annotations
+
+import struct
+from pathlib import Path
+from typing import BinaryIO
+
+from .constants import IMAGE_DIRECTORY_ENTRY_IMPORT, IMAGE_DIRECTORY_ENTRY_RESOURCE, SUBSYSTEM_TYPES
+from .models import ExecutableInfo, PEDataDirectory, PEImport, PESection
+from .packages import resolve_input
 from .pe_utils import rva_to_file_offset
 from .resources import extract_manifest, extract_version_info
 
+MACHINE_TYPES = {0x014C: "x86", 0x8664: "x86_64", 0xAA64: "ARM64"}
+PE_FORMATS = {0x10B: "PE32 (32-bit)", 0x20B: "PE32+ (64-bit)"}
 
-MACHINE_TYPES = {
-    0x014C: "x86",
-    0x8664: "x86_64",
-    0xAA64: "ARM64",
-}
+MAX_SECTIONS = 96
+MAX_IMPORT_DESCRIPTORS = 4096
+MAX_IMPORT_FUNCTIONS = 65_536
+MAX_NAME_BYTES = 4096
+MAX_DATA_DIRECTORIES = 16
 
 
-PE_FORMATS = {
-    0x10B: "PE32 (32-bit)",
-    0x20B: "PE32+ (64-bit)",
-}
+def _section_file_end(rva: int, sections: list[PESection]) -> int | None:
+    for section in sections:
+        if section.virtual_address <= rva < section.virtual_address + section.raw_size:
+            return section.raw_offset + section.raw_size
+    return None
+
+
+def _invalid(path: Path, reason: str) -> ExecutableInfo:
+    return ExecutableInfo(path=path, valid=False, reason=reason)
+
+
+def _read_c_string(file: BinaryIO, offset: int, file_size: int) -> str | None:
+    if offset < 0 or offset >= file_size:
+        return None
+    file.seek(offset)
+    raw = bytearray()
+    for _ in range(min(MAX_NAME_BYTES, file_size - offset)):
+        byte = file.read(1)
+        if byte == b"\x00":
+            return raw.decode("ascii", errors="replace") if raw else None
+        if not byte:
+            break
+        raw.extend(byte)
+    return None
 
 
 def parse_import_functions(
-    file,
+    file: BinaryIO,
     thunk_rva: int,
     sections: list[PESection],
     pe_format: str,
+    file_size: int | None = None,
 ) -> list[str]:
-    """Parse imported function names from an Import Lookup Table."""
+    """Parse imported names from an Import Lookup Table safely."""
 
-    thunk_offset = rva_to_file_offset(
-        thunk_rva,
-        sections,
-    )
-
+    thunk_offset = rva_to_file_offset(thunk_rva, sections)
     if thunk_offset is None:
         return []
-
-    functions = []
+    if file_size is None:
+        current = file.tell()
+        file.seek(0, 2)
+        file_size = file.tell()
+        file.seek(current)
 
     if pe_format == "PE32+ (64-bit)":
-        thunk_size = 8
-        unpack_format = "<Q"
-        ordinal_flag = 0x8000000000000000
+        thunk_size, unpack_format, ordinal_flag = 8, "<Q", 1 << 63
     else:
-        thunk_size = 4
-        unpack_format = "<I"
-        ordinal_flag = 0x80000000
+        thunk_size, unpack_format, ordinal_flag = 4, "<I", 1 << 31
 
-    current_offset = thunk_offset
-
-    while True:
-        file.seek(current_offset)
-
-        thunk_bytes = file.read(thunk_size)
-
-        if len(thunk_bytes) != thunk_size:
+    functions: list[str] = []
+    section_end = _section_file_end(thunk_rva, sections) or file_size
+    max_entries = min(
+        MAX_IMPORT_FUNCTIONS,
+        (min(file_size, section_end) - thunk_offset) // thunk_size,
+    )
+    for index in range(max_entries):
+        file.seek(thunk_offset + index * thunk_size)
+        raw = file.read(thunk_size)
+        if len(raw) != thunk_size:
             break
-
-        thunk_value = struct.unpack(
-            unpack_format,
-            thunk_bytes,
-        )[0]
-
-        # A zero entry marks the end of the table.
+        thunk_value = struct.unpack(unpack_format, raw)[0]
         if thunk_value == 0:
             break
-
-        # Imported by ordinal instead of by name.
         if thunk_value & ordinal_flag:
-            ordinal = thunk_value & ~ordinal_flag
-            functions.append(f"Ordinal #{ordinal}")
-
-        else:
-            # The thunk points to an IMAGE_IMPORT_BY_NAME structure.
-            name_offset = rva_to_file_offset(
-                thunk_value,
-                sections,
-            )
-
-            if name_offset is not None:
-                file.seek(name_offset)
-
-                # First 2 bytes are the hint.
-                hint_bytes = file.read(2)
-
-                if len(hint_bytes) != 2:
-                    current_offset += thunk_size
-                    continue
-
-                name_bytes = bytearray()
-
-                # Safety limit.
-                for _ in range(512):
-                    byte = file.read(1)
-
-                    if not byte or byte == b"\x00":
-                        break
-
-                    name_bytes.extend(byte)
-
-                if name_bytes:
-                    function_name = name_bytes.decode(
-                        "ascii",
-                        errors="replace",
-                    )
-
-                    functions.append(function_name)
-
-        current_offset += thunk_size
-
+            functions.append(f"Ordinal #{thunk_value & (ordinal_flag - 1)}")
+            continue
+        name_offset = rva_to_file_offset(thunk_value, sections)
+        if name_offset is None or name_offset + 2 > file_size:
+            continue
+        name = _read_c_string(file, name_offset + 2, file_size)
+        if name:
+            functions.append(name)
     return functions
 
 
 def parse_imports(
-    file,
+    file: BinaryIO,
     import_rva: int,
     sections: list[PESection],
     pe_format: str,
+    import_size: int | None = None,
+    file_size: int | None = None,
 ) -> list[PEImport]:
-    """Parse the PE import directory and return imported DLLs."""
+    """Parse the bounded PE import directory and return imported DLLs."""
 
-    import_offset = rva_to_file_offset(
-        import_rva,
-        sections,
-    )
-
+    import_offset = rva_to_file_offset(import_rva, sections)
     if import_offset is None:
         return []
+    if file_size is None:
+        current = file.tell()
+        file.seek(0, 2)
+        file_size = file.tell()
+        file.seek(current)
 
-    imports = []
-
-    descriptor_offset = import_offset
-
-    while True:
-        # Always return to the descriptor table before reading
-        # the next descriptor.
-        file.seek(descriptor_offset)
-
+    section_end = _section_file_end(import_rva, sections) or file_size
+    available = max(0, min(file_size, section_end) - import_offset)
+    declared = import_size if import_size and import_size > 0 else available
+    descriptor_count = min(MAX_IMPORT_DESCRIPTORS, declared // 20, available // 20)
+    imports: list[PEImport] = []
+    for index in range(descriptor_count):
+        file.seek(import_offset + index * 20)
         descriptor = file.read(20)
-
         if len(descriptor) != 20:
             break
-
-        (
-            original_first_thunk,
-            time_date_stamp,
-            forwarder_chain,
-            name_rva,
-            first_thunk,
-        ) = struct.unpack(
-            "<IIIII",
-            descriptor,
+        original_thunk, timestamp, forwarder, name_rva, first_thunk = struct.unpack(
+            "<IIIII", descriptor
         )
-
-        # A completely zeroed descriptor marks the end.
-        if (
-            original_first_thunk == 0
-            and time_date_stamp == 0
-            and forwarder_chain == 0
-            and name_rva == 0
-            and first_thunk == 0
-        ):
+        if not any((original_thunk, timestamp, forwarder, name_rva, first_thunk)):
             break
-
-        name_offset = rva_to_file_offset(
-            name_rva,
-            sections,
+        name_offset = rva_to_file_offset(name_rva, sections)
+        if name_offset is None:
+            continue
+        name = _read_c_string(file, name_offset, file_size)
+        if not name:
+            continue
+        lookup_thunk = original_thunk or first_thunk
+        functions = (
+            parse_import_functions(file, lookup_thunk, sections, pe_format, file_size)
+            if lookup_thunk
+            else []
         )
-
-        if name_offset is not None:
-            file.seek(name_offset)
-
-            name_bytes = bytearray()
-
-            # Put a safety limit on the string length.
-            for _ in range(512):
-                byte = file.read(1)
-
-                if not byte or byte == b"\x00":
-                    break
-
-                name_bytes.extend(byte)
-
-            if name_bytes:
-                name = name_bytes.decode(
-                    "ascii",
-                    errors="replace",
-                )
-
-                functions = []
-
-                if original_first_thunk != 0:
-                    functions = parse_import_functions(
-                        file,
-                        original_first_thunk,
-                        sections,
-                        pe_format,
-                    )
-
-                imports.append(
-                    PEImport(
-                        name=name, 
-                        functions=functions
-                    )
-                )
-
-        # Move to the next IMAGE_IMPORT_DESCRIPTOR.
-        descriptor_offset += 20
-
+        imports.append(PEImport(name=name, functions=functions))
     return imports
 
 
 def parse_sections(
-    file,
+    file: BinaryIO,
     section_table_start: int,
     number_of_sections: int,
+    file_size: int | None = None,
 ) -> list[PESection]:
+    if number_of_sections <= 0 or number_of_sections > MAX_SECTIONS:
+        raise ValueError("Unrealistic number of sections in PE header")
+    if file_size is not None and section_table_start + number_of_sections * 40 > file_size:
+        raise ValueError("Incomplete PE section table")
+
     file.seek(section_table_start)
-
-    sections = []
-
-    if number_of_sections > 96:
-        raise ValueError(
-            "Unrealistic number of sections in PE header"
-        )
-
+    sections: list[PESection] = []
     for _ in range(number_of_sections):
-        section_header = file.read(40)
-
-        if len(section_header) != 40:
+        header = file.read(40)
+        if len(header) != 40:
             raise ValueError("Incomplete PE section header")
-
-        name = section_header[0:8].rstrip(
-            b"\x00"
-        ).decode(
-            "ascii",
-            errors="replace",
-        )
-
-        virtual_size = struct.unpack(
-            "<I",
-            section_header[8:12],
-        )[0]
-
-        virtual_address = struct.unpack(
-            "<I",
-            section_header[12:16],
-        )[0]
-
-        raw_size = struct.unpack(
-            "<I",
-            section_header[16:20],
-        )[0]
-
-        raw_offset = struct.unpack(
-            "<I",
-            section_header[20:24],
-        )[0]
-
-        sections.append(
-            PESection(
-                name=name,
-                virtual_size=virtual_size,
-                virtual_address=virtual_address,
-                raw_size=raw_size,
-                raw_offset=raw_offset,
-            )
-        )
-
+        name = header[:8].rstrip(b"\x00").decode("ascii", errors="replace")
+        virtual_size, virtual_address, raw_size, raw_offset = struct.unpack("<IIII", header[8:24])
+        if raw_size and file_size is not None:
+            if raw_offset >= file_size or raw_size > file_size - raw_offset:
+                raise ValueError(f"Section {name or '<unnamed>'} extends beyond end of file")
+        sections.append(PESection(name, virtual_size, virtual_address, raw_size, raw_offset))
     return sections
 
 
 def parse_data_directories(
-    file,
+    file: BinaryIO,
     data_directory_start: int,
+    count: int = MAX_DATA_DIRECTORIES,
 ) -> list[PEDataDirectory]:
+    """Read up to the standard 16 directories and pad absent entries."""
+
+    count = max(0, min(count, MAX_DATA_DIRECTORIES))
     file.seek(data_directory_start)
-
-    data_directories = []
-
-    for _ in range(16):
-        directory_bytes = file.read(8)
-
-        if len(directory_bytes) != 8:
+    directories: list[PEDataDirectory] = []
+    for _ in range(count):
+        raw = file.read(8)
+        if len(raw) != 8:
             raise ValueError("Incomplete PE data directory")
+        directories.append(PEDataDirectory(*struct.unpack("<II", raw)))
+    directories.extend(
+        PEDataDirectory(0, 0) for _ in range(MAX_DATA_DIRECTORIES - len(directories))
+    )
+    return directories
 
-        virtual_address, size = struct.unpack(
-            "<II",
-            directory_bytes,
-        )
 
-        data_directories.append(
-            PEDataDirectory(
-                virtual_address=virtual_address,
-                size=size,
-            )
-        )
-    return data_directories
-
-def analyze_executable(file_path: str) -> ExecutableInfo:
-    path = Path(file_path)
-
+def _select_executable(path: Path) -> Path:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
+    if not path.is_dir():
+        if not path.is_file():
+            raise ValueError(f"Not a regular file: {path}")
+        return path
 
-    if path.is_dir():
-        executables = sorted(
-            item
-            for item in path.iterdir()
-            if item.is_file() and item.suffix.lower() == ".exe"
-        )
+    executables = sorted(
+        (item for item in path.iterdir() if item.is_file() and item.suffix.lower() == ".exe"),
+        key=lambda item: item.name.lower(),
+    )
+    if not executables:
+        raise ValueError(f"No executable files found in directory: {path}")
+    if len(executables) > 1:
+        names = "\n".join(f"  - {item.name}" for item in executables)
+        raise ValueError(f"Multiple executable files found in directory:\n{names}")
+    return executables[0]
 
-        if not executables:
-            raise ValueError(
-                f"No executable files found in directory: {path}"
-            )
 
-        if len(executables) > 1:
-            executable_list = "\n".join(
-                f"  - {executable.name}"
-                for executable in executables
-            )
+def analyze_executable(file_path: str | Path) -> ExecutableInfo:
+    """Analyze a PE executable or materialize an AppX/MSIX package for inspection."""
 
-            raise ValueError(
-                f"Multiple executable files found in directory:\n"
-                f"{executable_list}"
-            )
-
-        return analyze_executable(str(executables[0]))
-
-    if not path.is_file():
-        raise ValueError(f"Not a regular file: {path}")
+    input_path = Path(file_path)
+    path, package = resolve_input(input_path)
+    if package is None:
+        path = _select_executable(path)
+    file_size = path.stat().st_size
+    if file_size < 64:
+        return _invalid(path, "File is too small to contain a valid DOS header")
 
     with path.open("rb") as file:
-
-        # ---------------------------------------------------------
-        # DOS HEADER
-        # ---------------------------------------------------------
-
-        mz_signature = file.read(2)
-
-        if mz_signature != b"MZ":
-            return ExecutableInfo(
-                path=path,
-                valid=False,
-                reason=(
-                    "Not a valid Windows executable "
-                    "(missing MZ signature)"
-                ),
-            )
-
-        # e_lfanew: file offset of the PE header
+        if file.read(2) != b"MZ":
+            return _invalid(path, "Not a valid Windows executable (missing MZ signature)")
         file.seek(0x3C)
-
-        pe_offset_bytes = file.read(4)
-
-        if len(pe_offset_bytes) != 4:
-            return ExecutableInfo(
-                path=path,
-                valid=False,
-                reason=(
-                    "File is too small to contain "
-                    "a valid PE header"
-                ),
-            )
-
-        pe_offset = struct.unpack(
-            "<I",
-            pe_offset_bytes,
-        )[0]
-
-        # ---------------------------------------------------------
-        # PE SIGNATURE
-        # ---------------------------------------------------------
+        raw = file.read(4)
+        if len(raw) != 4:
+            return _invalid(path, "File is too small to contain a valid PE header")
+        pe_offset = struct.unpack("<I", raw)[0]
+        if pe_offset > file_size - 24:
+            return _invalid(path, "PE header offset is outside the file")
 
         file.seek(pe_offset)
-
-        pe_signature = file.read(4)
-
-        if pe_signature != b"PE\x00\x00":
-            return ExecutableInfo(
-                path=path,
-                valid=False,
-                reason="Invalid PE signature",
-            )
-
-        # ---------------------------------------------------------
-        # COFF HEADER
-        # ---------------------------------------------------------
-
-        # Machine
-        machine_bytes = file.read(2)
-
-        if len(machine_bytes) != 2:
-            return ExecutableInfo(
-                path=path,
-                valid=False,
-                reason="Missing machine type in PE header",
-            )
-
-        machine = struct.unpack(
-            "<H",
-            machine_bytes,
-        )[0]
-
-        architecture = MACHINE_TYPES.get(
-            machine,
-            f"Unknown (0x{machine:04X})",
+        if file.read(4) != b"PE\x00\x00":
+            return _invalid(path, "Invalid PE signature")
+        coff = file.read(20)
+        if len(coff) != 20:
+            return _invalid(path, "Incomplete COFF header")
+        machine, section_count, _timestamp, _symbols, _symbol_count, optional_size, _flags = (
+            struct.unpack("<HHIIIHH", coff)
         )
+        architecture = MACHINE_TYPES.get(machine, f"Unknown (0x{machine:04X})")
 
-        # NumberOfSections
-        number_of_sections_bytes = file.read(2)
+        optional_start = file.tell()
+        if optional_size < 2 or optional_start + optional_size > file_size:
+            return _invalid(path, "Incomplete PE optional header")
+        optional = file.read(optional_size)
+        magic = struct.unpack_from("<H", optional)[0]
+        pe_format = PE_FORMATS.get(magic)
+        if pe_format is None:
+            return _invalid(path, f"Unknown PE optional header format (0x{magic:04X})")
 
-        if len(number_of_sections_bytes) != 2:
-            return ExecutableInfo(
-                path=path,
-                valid=False,
-                reason="Missing number of sections in PE header",
-            )
+        directory_offset = 96 if magic == 0x10B else 112
+        count_offset = 92 if magic == 0x10B else 108
+        if optional_size < count_offset + 4:
+            return _invalid(path, "Optional header is too small for its PE format")
+        subsystem = None
+        if optional_size >= 70:
+            subsystem_value = struct.unpack_from("<H", optional, 68)[0]
+            subsystem = SUBSYSTEM_TYPES.get(subsystem_value, f"Unknown (0x{subsystem_value:04X})")
 
-        number_of_sections = struct.unpack(
-            "<H",
-            number_of_sections_bytes,
-        )[0]
-
-        # TimeDateStamp
-        # PointerToSymbolTable
-        # NumberOfSymbols
-        file.seek(12, 1)
-
-        # SizeOfOptionalHeader
-        optional_header_size_bytes = file.read(2)
-
-        if len(optional_header_size_bytes) != 2:
-            return ExecutableInfo(
-                path=path,
-                valid=False,
-                reason="Missing optional header size",
-            )
-
-        optional_header_size = struct.unpack(
-            "<H",
-            optional_header_size_bytes,
-        )[0]
-
-        # Characteristics
-        file.seek(2, 1)
-
-        # ---------------------------------------------------------
-        # OPTIONAL HEADER
-        # ---------------------------------------------------------
-
-        optional_header_start = file.tell()
-
-        optional_header_magic_bytes = file.read(2)
-
-        if len(optional_header_magic_bytes) != 2:
-            return ExecutableInfo(
-                path=path,
-                valid=False,
-                reason="Missing PE optional header",
-            )
-
-        optional_header_magic = struct.unpack(
-            "<H",
-            optional_header_magic_bytes,
-        )[0]
-
-        pe_format = PE_FORMATS.get(
-            optional_header_magic,
-            f"Unknown (0x{optional_header_magic:04X})",
-        )
-
-        if optional_header_magic == 0x10B:
-            data_directory_offset = 96
-        elif optional_header_magic == 0x20B:
-            data_directory_offset = 112
-        else:
-            return ExecutableInfo(
-                path=path,
-                valid=False,
-                reason="Unknown PE optional header format",
-            )
-
-        # ---------------------------------------------------------
-        # SUBSYSTEM
-        # ---------------------------------------------------------
-
-        # Subsystem sits at the same offset (68) in both the PE32 and
-        # PE32+ optional headers: PE32+'s ImageBase grows from 4 to 8
-        # bytes but drops the 4-byte BaseOfData field that PE32 has,
-        # so every field from SectionAlignment onward lines up.
-        file.seek(optional_header_start + 68)
-
-        subsystem_bytes = file.read(2)
-
-        if len(subsystem_bytes) == 2:
-            subsystem_value = struct.unpack(
-                "<H",
-                subsystem_bytes,
-            )[0]
-
-            subsystem = SUBSYSTEM_TYPES.get(
-                subsystem_value,
-                f"Unknown (0x{subsystem_value:04X})",
-            )
-        else:
-            subsystem = None
-
-        # ---------------------------------------------------------
-        # DATA DIRECTORIES
-        # ---------------------------------------------------------
-
-        data_directory_start = (
-            optional_header_start
-            + data_directory_offset
-        )
-
-        section_table_start = (
-            optional_header_start
-            + optional_header_size
-        )
-
+        declared_count = struct.unpack_from("<I", optional, count_offset)[0]
+        available_count = max(0, (optional_size - directory_offset) // 8)
+        directory_count = min(declared_count, available_count, MAX_DATA_DIRECTORIES)
         try:
             data_directories = parse_data_directories(
-                file,
-                data_directory_start,
+                file, optional_start + directory_offset, directory_count
             )
-
-            # ---------------------------------------------------------
-            # SECTION TABLE
-            # ---------------------------------------------------------
-
             sections = parse_sections(
-                file,
-                section_table_start,
-                number_of_sections,
+                file, optional_start + optional_size, section_count, file_size
             )
         except ValueError as error:
-            return ExecutableInfo(
-                path=path,
-                valid=False,
-                reason=str(error),
-            )
+            return _invalid(path, str(error))
 
-        # ---------------------------------------------------------
-        # IMPORTS
-        # ---------------------------------------------------------
-
+        imports: list[PEImport] = []
         import_directory = data_directories[IMAGE_DIRECTORY_ENTRY_IMPORT]
-
-        imports = []
-
-        if (
-            import_directory.virtual_address != 0
-            and import_directory.size != 0
-        ):
+        if import_directory.virtual_address and import_directory.size:
             imports = parse_imports(
                 file,
                 import_directory.virtual_address,
                 sections,
                 pe_format,
+                import_directory.size,
+                file_size,
             )
-
-        # ---------------------------------------------------------
-        # RESOURCES (manifest + version info)
-        # ---------------------------------------------------------
 
         manifest = None
         version_info = None
-
-        resource_directory = data_directories[
-            IMAGE_DIRECTORY_ENTRY_RESOURCE
-        ]
-
-        if (
-            resource_directory.virtual_address != 0
-            and resource_directory.size != 0
-        ):
+        resource_directory = data_directories[IMAGE_DIRECTORY_ENTRY_RESOURCE]
+        if resource_directory.virtual_address and resource_directory.size:
             manifest = extract_manifest(
                 file,
                 sections,
                 resource_directory.virtual_address,
+                resource_directory.size,
+                file_size,
             )
-
             version_info = extract_version_info(
                 file,
                 sections,
                 resource_directory.virtual_address,
+                resource_directory.size,
+                file_size,
             )
 
     return ExecutableInfo(
@@ -609,4 +320,5 @@ def analyze_executable(file_path: str) -> ExecutableInfo:
         imports=imports,
         manifest=manifest,
         version_info=version_info,
+        package=package,
     )

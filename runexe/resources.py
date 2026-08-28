@@ -12,11 +12,10 @@ import struct
 
 from .constants import RESOURCE_TYPE_MANIFEST, RESOURCE_TYPE_VERSION
 from .models import PESection, VersionInfo
-from .pe_utils import rva_to_file_offset
-
+from .pe_utils import rva_range_to_file_offset, rva_to_file_offset
 
 _EXECUTION_LEVEL_RE = re.compile(
-    r'<requestedExecutionLevel[^>]*\blevel="([^"]+)"',
+    r"<(?:[\w.-]+:)?requestedExecutionLevel\b[^>]*\blevel\s*=\s*['\"]([^'\"]+)['\"]",
     re.IGNORECASE,
 )
 
@@ -43,8 +42,17 @@ def extract_requested_execution_level(manifest_xml: str) -> str | None:
 def _read_resource_directory_entries(
     file,
     directory_offset: int,
+    allowed_start: int | None = None,
+    allowed_end: int | None = None,
 ) -> list[tuple[int, int]] | None:
     """Read the entries of an IMAGE_RESOURCE_DIRECTORY at a file offset."""
+
+    if (
+        allowed_start is not None
+        and allowed_end is not None
+        and not (allowed_start <= directory_offset <= allowed_end - 16)
+    ):
+        return None
 
     file.seek(directory_offset)
 
@@ -68,6 +76,9 @@ def _read_resource_directory_entries(
     if total_entries > 1024:
         return None
 
+    if allowed_end is not None and directory_offset + 16 + total_entries * 8 > allowed_end:
+        return None
+
     entries = []
 
     for _ in range(total_entries):
@@ -86,6 +97,7 @@ def _find_resource_data(
     file,
     resource_base_offset: int,
     type_id: int,
+    resource_size: int | None = None,
 ) -> tuple[int, int] | None:
     """Walk Type -> Name -> Language to find a resource's (RVA, size).
 
@@ -95,9 +107,9 @@ def _find_resource_data(
     leaf IMAGE_RESOURCE_DATA_ENTRY.
     """
 
+    resource_end = resource_base_offset + resource_size if resource_size is not None else None
     type_entries = _read_resource_directory_entries(
-        file,
-        resource_base_offset,
+        file, resource_base_offset, resource_base_offset, resource_end
     )
 
     if not type_entries:
@@ -113,13 +125,13 @@ def _find_resource_data(
     if type_offset is None or not (type_offset & 0x80000000):
         return None
 
-    name_directory_offset = resource_base_offset + (
-        type_offset & 0x7FFFFFFF
-    )
+    name_directory_offset = resource_base_offset + (type_offset & 0x7FFFFFFF)
 
     name_entries = _read_resource_directory_entries(
         file,
         name_directory_offset,
+        resource_base_offset,
+        resource_end,
     )
 
     if not name_entries:
@@ -130,13 +142,13 @@ def _find_resource_data(
     if not (name_offset & 0x80000000):
         return None
 
-    language_directory_offset = resource_base_offset + (
-        name_offset & 0x7FFFFFFF
-    )
+    language_directory_offset = resource_base_offset + (name_offset & 0x7FFFFFFF)
 
     language_entries = _read_resource_directory_entries(
         file,
         language_directory_offset,
+        resource_base_offset,
+        resource_end,
     )
 
     if not language_entries:
@@ -149,6 +161,11 @@ def _find_resource_data(
         return None
 
     data_entry_offset = resource_base_offset + language_offset
+
+    if resource_end is not None and not (
+        resource_base_offset <= data_entry_offset <= resource_end - 16
+    ):
+        return None
 
     file.seek(data_entry_offset)
 
@@ -170,6 +187,8 @@ def _read_resource_bytes(
     sections: list[PESection],
     resource_directory_rva: int,
     type_id: int,
+    resource_directory_size: int | None = None,
+    file_size: int | None = None,
 ) -> bytes | None:
     resource_base_offset = rva_to_file_offset(
         resource_directory_rva,
@@ -184,6 +203,7 @@ def _read_resource_bytes(
             file,
             resource_base_offset,
             type_id,
+            resource_directory_size,
         )
     except struct.error:
         return None
@@ -197,9 +217,12 @@ def _read_resource_bytes(
     if size <= 0 or size > 32 * 1024 * 1024:
         return None
 
-    data_offset = rva_to_file_offset(data_rva, sections)
+    data_offset = rva_range_to_file_offset(data_rva, size, sections)
 
     if data_offset is None:
+        return None
+
+    if file_size is not None and (data_offset >= file_size or size > file_size - data_offset):
         return None
 
     file.seek(data_offset)
@@ -216,6 +239,8 @@ def extract_manifest(
     file,
     sections: list[PESection],
     resource_directory_rva: int,
+    resource_directory_size: int | None = None,
+    file_size: int | None = None,
 ) -> str | None:
     """Extract the embedded application manifest (RT_MANIFEST) as text."""
 
@@ -224,21 +249,36 @@ def extract_manifest(
         sections,
         resource_directory_rva,
         RESOURCE_TYPE_MANIFEST,
+        resource_directory_size,
+        file_size,
     )
 
     if data is None:
         return None
 
-    try:
-        return data.decode("utf-8-sig", errors="replace")
-    except UnicodeDecodeError:
-        return None
+    return _decode_manifest(data)
+
+
+def _decode_manifest(data: bytes) -> str:
+    """Decode common manifest encodings, including BOM-less UTF-16LE."""
+
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16", errors="replace").rstrip("\x00")
+
+    # Some linkers emit UTF-16LE XML without a byte-order mark.
+    sample = data[:128]
+    if sample and sample[1::2].count(0) > len(sample[1::2]) // 2:
+        return data.decode("utf-16-le", errors="replace").rstrip("\x00")
+
+    return data.decode("utf-8-sig", errors="replace").rstrip("\x00")
 
 
 def extract_version_info(
     file,
     sections: list[PESection],
     resource_directory_rva: int,
+    resource_directory_size: int | None = None,
+    file_size: int | None = None,
 ) -> VersionInfo | None:
     """Extract the VS_VERSIONINFO resource (RT_VERSION), if present."""
 
@@ -247,6 +287,8 @@ def extract_version_info(
         sections,
         resource_directory_rva,
         RESOURCE_TYPE_VERSION,
+        resource_directory_size,
+        file_size,
     )
 
     if data is None:
@@ -274,19 +316,20 @@ def _align4(offset: int) -> int:
     return (offset + 3) & ~3
 
 
-def _read_wstring(raw: bytes, offset: int) -> tuple[str, int]:
+def _read_wstring(raw: bytes, offset: int, limit: int | None = None) -> tuple[str, int]:
     """Decode a null-terminated UTF-16LE string starting at `offset`.
 
     Returns (string, offset immediately after the null terminator).
     """
 
     end = offset
+    limit = min(limit if limit is not None else len(raw), len(raw))
 
-    while end + 1 < len(raw) and raw[end:end + 2] != b"\x00\x00":
+    while end + 1 < limit and raw[end : end + 2] != b"\x00\x00":
         end += 2
 
     text = raw[offset:end].decode("utf-16-le", errors="replace")
-    return text, end + 2
+    return text, min(end + 2, limit)
 
 
 def _iter_version_blocks(raw: bytes, start: int, end: int):
@@ -301,14 +344,15 @@ def _iter_version_blocks(raw: bytes, start: int, end: int):
         if block_length == 0:
             break
 
-        value_words = struct.unpack_from("<H", raw, pos + 2)[0]
-
-        key, key_end = _read_wstring(raw, pos + 6)
-        value_offset = _align4(key_end)
-
         block_end = pos + block_length
 
-        if block_end <= pos or block_end > len(raw):
+        if block_end <= pos or block_end > end or block_end > len(raw):
+            break
+
+        value_words = struct.unpack_from("<H", raw, pos + 2)[0]
+        key, key_end = _read_wstring(raw, pos + 6, block_end)
+        value_offset = _align4(key_end)
+        if value_offset > block_end:
             break
 
         yield key, value_words, value_offset, block_end
@@ -324,13 +368,17 @@ def _parse_version_info(raw: bytes) -> VersionInfo:
 
     w_length = struct.unpack_from("<H", raw, 0)[0]
     w_value_length = struct.unpack_from("<H", raw, 2)[0]
+    w_type = struct.unpack_from("<H", raw, 4)[0]
 
-    _key, key_end = _read_wstring(raw, 6)
+    if w_length < 6 or w_length > len(raw):
+        return version_info
+
+    _key, key_end = _read_wstring(raw, 6, w_length)
     fixed_info_start = _align4(key_end)
 
     if w_value_length:
         # VS_FIXEDFILEINFO is a fixed 52-byte / 13-DWORD structure.
-        fixed = raw[fixed_info_start:fixed_info_start + 52]
+        fixed = raw[fixed_info_start : fixed_info_start + 52]
 
         if len(fixed) == 52:
             fields = struct.unpack("<13I", fixed)
@@ -350,16 +398,17 @@ def _parse_version_info(raw: bytes) -> VersionInfo:
                     f"{product_version_ls & 0xFFFF}"
                 )
 
-    children_start = _align4(fixed_info_start + w_value_length * 2)
+    # wValueLength is bytes for binary values (wType=0) and UTF-16 code
+    # units for text values (wType=1). VS_FIXEDFILEINFO is binary.
+    value_size = w_value_length if w_type == 0 else w_value_length * 2
+    children_start = _align4(fixed_info_start + value_size)
     children_end = min(w_length, len(raw))
 
     for key, _value_words, value_offset, block_end in _iter_version_blocks(
         raw, children_start, children_end
     ):
         if key == "StringFileInfo":
-            _parse_string_file_info(
-                raw, value_offset, block_end, version_info
-            )
+            _parse_string_file_info(raw, value_offset, block_end, version_info)
 
     return version_info
 
@@ -371,16 +420,15 @@ def _parse_string_file_info(
     version_info: VersionInfo,
 ) -> None:
     # Children here are StringTable blocks, one per language/codepage.
-    for _table_key, _v, table_value_offset, table_end in _iter_version_blocks(
-        raw, start, end
-    ):
-        for name, value_words, value_offset, _block_end in _iter_version_blocks(
+    for _table_key, _v, table_value_offset, table_end in _iter_version_blocks(raw, start, end):
+        for name, value_words, value_offset, block_end in _iter_version_blocks(
             raw, table_value_offset, table_end
         ):
             if not value_words:
                 continue
 
-            value_bytes = raw[value_offset:value_offset + value_words * 2]
+            value_end = min(value_offset + value_words * 2, block_end)
+            value_bytes = raw[value_offset:value_end]
 
             version_info.strings[name] = value_bytes.decode(
                 "utf-16-le",
