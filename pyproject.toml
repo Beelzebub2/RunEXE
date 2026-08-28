@@ -1,12 +1,35 @@
 [project]
 name = "runexe"
-version = "0.1.1"
+version = "0.2.0"
 description = "Automatically analyze and run Windows executables on Linux"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "LGPL-2.1-only"
+authors = [{name = "RunEXE contributors"}]
+keywords = ["wine", "windows", "linux", "pe", "executable"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: System :: Emulators",
+]
 dependencies = [
     "typer>=0.12"
 ]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2",
+    "pytest>=8.0",
+    "ruff>=0.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/cdjuaum/runexe"
+Issues = "https://github.com/cdjuaum/runexe/issues"
 
 [project.scripts]
 runexe = "runexe.cli:main"
@@ -14,3 +37,17 @@ runexe = "runexe.cli:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["runexe*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

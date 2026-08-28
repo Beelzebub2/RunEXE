@@ -31,10 +31,9 @@ WINE_ARCH_BY_ARCHITECTURE = {
     "x86_64": "win64",
 }
 
-# Anti-cheat / DRM DLLs that are reliably identifiable by name in the
-# import table. Both entries below are dominant, well-documented
-# anti-cheat systems that ship a distinctly named client DLL the game
-# actually imports.
+# Anti-cheat DLLs that are identifiable by name in the import table.
+# Presence is a compatibility warning, not a blocker: EAC and BattlEye
+# support is enabled by publishers on a per-title basis for Proton.
 #
 # Deliberately NOT included: Denuvo and most VM-based packers/DRM.
 # These wrap or encrypt the executable itself rather than shipping a

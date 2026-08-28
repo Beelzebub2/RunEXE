@@ -1,5 +1,5 @@
-import sys
 import subprocess
+import sys
 
 from .models import PESection
 
@@ -12,15 +12,34 @@ def rva_to_file_offset(
 
     for section in sections:
         section_start = section.virtual_address
-        section_end = section_start + max(
-            section.virtual_size,
-            section.raw_size,
-        )
+        # Only bytes backed by the file can be parsed. VirtualSize can
+        # include zero-filled memory beyond SizeOfRawData; mapping that
+        # range would point into unrelated file data or past EOF.
+        section_end = section_start + section.raw_size
 
         if section_start <= rva < section_end:
             offset_inside_section = rva - section_start
             return section.raw_offset + offset_inside_section
 
+    return None
+
+
+def rva_range_to_file_offset(
+    rva: int,
+    size: int,
+    sections: list[PESection],
+) -> int | None:
+    """Map an RVA range only when every requested byte is file-backed."""
+
+    if size < 0:
+        return None
+    for section in sections:
+        offset_in_section = rva - section.virtual_address
+        if (
+            0 <= offset_in_section <= section.raw_size
+            and size <= section.raw_size - offset_in_section
+        ):
+            return section.raw_offset + offset_in_section
     return None
 
 
@@ -61,10 +80,7 @@ def run_with_progress(
         if result.returncode == 0:
             print("[runexe] Completed successfully.")
         else:
-            print(
-                f"[runexe] Failed with exit code "
-                f"{result.returncode}."
-            )
+            print(f"[runexe] Failed with exit code {result.returncode}.")
     else:
         if result.returncode == 0:
             sys.stdout.write("✓\n")
