@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shlex
 import sys
-from dataclasses import dataclass
+import uuid
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,12 +19,23 @@ from PySide6.QtCore import (
     QProcessEnvironment,
     QPropertyAnimation,
     QSettings,
+    QSignalBlocker,
     Qt,
     QThreadPool,
     QTimer,
+    QUrl,
     QVariantAnimation,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QColor,
+    QDesktopServices,
+    QIcon,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -33,6 +47,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -46,7 +61,14 @@ from PySide6.QtWidgets import (
 from runexe import __version__
 from runexe.analyzer import analyze_executable
 from runexe.compatibility import analyze_compatibility
+from runexe.environments import (
+    EnvironmentInfo,
+    discover_environments,
+    format_size,
+    remove_managed_environment,
+)
 from runexe.host import detect_host
+from runexe.library import ApplicationLibrary, ApplicationRecord, LaunchPreset
 from runexe.models import CompatibilityReport, ExecutableInfo, HostInfo
 from runexe.profiles import detect_runtime_issue
 from runexe.proton import ProtonInstallation, discover_proton_installations
@@ -69,6 +91,12 @@ class AnalysisBundle:
     host: HostInfo
     compatibility: CompatibilityReport
     proton_installations: list[ProtonInstallation]
+
+
+@dataclass(frozen=True)
+class LibraryBundle:
+    applications: list[ApplicationRecord]
+    environments: list[EnvironmentInfo]
 
 
 def _asset_path() -> Path:
@@ -108,12 +136,21 @@ class RunEXEWindow(QMainWindow):
     PAGE_TITLES = (
         ("Overview", "Inspect an application and launch it with a clear compatibility plan."),
         ("Runtime setup", "Choose, prepare, and configure isolated Wine or Proton environments."),
+        ("Library", "Reopen recent software and manage RunEXE's isolated environments."),
         ("Activity", "Review analysis, preparation, launch output, and errors."),
     )
 
-    def __init__(self, initial_file: Path | None = None, *, auto_refresh: bool = True) -> None:
+    def __init__(
+        self,
+        initial_file: Path | None = None,
+        *,
+        auto_refresh: bool = True,
+        application_library: ApplicationLibrary | None = None,
+    ) -> None:
         super().__init__()
         self.settings = QSettings("RunEXE", "RunEXE")
+        self.application_library = application_library or ApplicationLibrary()
+        self.auto_refresh = auto_refresh
         self.thread_pool = QThreadPool.globalInstance()
         self._workers: dict[str, Worker] = {}
         self.source_path: Path | None = None
@@ -121,7 +158,10 @@ class RunEXEWindow(QMainWindow):
         self.host: HostInfo | None = None
         self.compatibility: CompatibilityReport | None = None
         self.proton_installations: list[ProtonInstallation] = []
+        self._managed_environments: list[EnvironmentInfo] = []
         self.application_process: QProcess | None = None
+        self._active_launch_path: Path | None = None
+        self._active_launch_preset: LaunchPreset | None = None
         self._application_output: list[str] = []
         self._page_animation: QVariantAnimation | None = None
         self._profile_animation: QPropertyAnimation | None = None
@@ -140,6 +180,7 @@ class RunEXEWindow(QMainWindow):
 
         if auto_refresh:
             QTimer.singleShot(80, self.refresh_runtimes)
+            QTimer.singleShot(120, self.refresh_library)
         if initial_file is not None:
             QTimer.singleShot(150, lambda: self.analyze_path(initial_file))
 
@@ -190,7 +231,7 @@ class RunEXEWindow(QMainWindow):
         layout.addSpacing(20)
 
         self.nav_buttons: list[QPushButton] = []
-        for index, title_text in enumerate(("Overview", "Runtime setup", "Activity")):
+        for index, title_text in enumerate(("Overview", "Runtime setup", "Library", "Activity")):
             nav = QPushButton(title_text)
             nav.setProperty("nav", True)
             nav.setCheckable(True)
@@ -242,6 +283,7 @@ class RunEXEWindow(QMainWindow):
         self.pages.setAutoFillBackground(True)
         self.pages.addWidget(self._build_overview_page())
         self.pages.addWidget(self._build_runtime_page())
+        self.pages.addWidget(self._build_library_page())
         self.pages.addWidget(self._build_activity_page())
         layout.addWidget(self.pages, 1)
 
@@ -523,6 +565,83 @@ class RunEXEWindow(QMainWindow):
         layout.addStretch(1)
         return scroll
 
+    def _build_library_page(self) -> QWidget:
+        scroll, _content, layout = self._scroll_page()
+        self.library_scroll = scroll
+
+        summary_grid = QGridLayout()
+        summary_grid.setHorizontalSpacing(12)
+        self.library_apps_metric = MetricCard("Recent applications")
+        self.library_storage_metric = MetricCard("Managed storage")
+        summary_grid.addWidget(self.library_apps_metric, 0, 0)
+        summary_grid.addWidget(self.library_storage_metric, 0, 1)
+        summary_grid.setColumnStretch(0, 1)
+        summary_grid.setColumnStretch(1, 1)
+        layout.addLayout(summary_grid)
+
+        recent_card = Card()
+        recent_layout = QVBoxLayout(recent_card)
+        recent_layout.setContentsMargins(20, 18, 20, 20)
+        recent_header = QHBoxLayout()
+        recent_header.addLayout(
+            _section_header(
+                "Application library",
+                "Double-click an entry to restore its backend, Windows version, and arguments.",
+            ),
+            1,
+        )
+        self.library_refresh_button = _button("Refresh")
+        self.library_refresh_button.clicked.connect(self.refresh_library)
+        recent_header.addWidget(self.library_refresh_button)
+        recent_layout.addLayout(recent_header)
+        self.recent_list = QListWidget()
+        self.recent_list.setMinimumHeight(190)
+        self.recent_list.itemDoubleClicked.connect(lambda _item: self.open_recent_application())
+        self.recent_list.itemSelectionChanged.connect(self._update_library_actions)
+        recent_layout.addWidget(self.recent_list)
+        recent_actions = QHBoxLayout()
+        self.recent_open_button = _button("Open and analyze", primary=True)
+        self.recent_open_button.clicked.connect(self.open_recent_application)
+        self.recent_forget_button = _button("Forget entry")
+        self.recent_forget_button.clicked.connect(self.forget_recent_application)
+        self.recent_prune_button = _button("Prune missing")
+        self.recent_prune_button.clicked.connect(self.prune_missing_applications)
+        recent_actions.addWidget(self.recent_open_button)
+        recent_actions.addWidget(self.recent_forget_button)
+        recent_actions.addStretch(1)
+        recent_actions.addWidget(self.recent_prune_button)
+        recent_layout.addLayout(recent_actions)
+        layout.addWidget(recent_card)
+
+        environments_card = Card()
+        environments_layout = QVBoxLayout(environments_card)
+        environments_layout.setContentsMargins(20, 18, 20, 20)
+        environments_layout.addLayout(
+            _section_header(
+                "Isolated environments",
+                "Inspect disk usage or remove a RunEXE-owned prefix after a clear confirmation.",
+            )
+        )
+        self.environment_list = QListWidget()
+        self.environment_list.setMinimumHeight(190)
+        self.environment_list.itemDoubleClicked.connect(
+            lambda _item: self.open_environment_folder()
+        )
+        self.environment_list.itemSelectionChanged.connect(self._update_library_actions)
+        environments_layout.addWidget(self.environment_list)
+        environment_actions = QHBoxLayout()
+        self.environment_open_button = _button("Open folder")
+        self.environment_open_button.clicked.connect(self.open_environment_folder)
+        self.environment_remove_button = _button("Remove environment")
+        self.environment_remove_button.clicked.connect(self.remove_selected_environment)
+        environment_actions.addWidget(self.environment_open_button)
+        environment_actions.addWidget(self.environment_remove_button)
+        environment_actions.addStretch(1)
+        environments_layout.addLayout(environment_actions)
+        layout.addWidget(environments_card)
+        layout.addStretch(1)
+        return scroll
+
     def _build_activity_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -536,8 +655,11 @@ class RunEXEWindow(QMainWindow):
         header.addLayout(titles, 1)
         copy_button = _button("Copy")
         copy_button.clicked.connect(self.copy_activity)
+        export_button = _button("Export report")
+        export_button.clicked.connect(self.export_support_report)
         clear_button = _button("Clear")
         clear_button.clicked.connect(self.clear_activity)
+        header.addWidget(export_button)
         header.addWidget(copy_button)
         header.addWidget(clear_button)
         layout.addLayout(header)
@@ -554,8 +676,12 @@ class RunEXEWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.launch_application)
         activity_action = QAction("Show activity", self)
         activity_action.setShortcut(QKeySequence("Ctrl+L"))
-        activity_action.triggered.connect(lambda: self._show_page(2))
+        activity_action.triggered.connect(lambda: self._show_page(3))
         self.addAction(activity_action)
+        library_action = QAction("Show library", self)
+        library_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
+        library_action.triggered.connect(lambda: self._show_page(2))
+        self.addAction(library_action)
 
     # ------------------------------------------------------------- State/UI
     def _show_page(self, index: int) -> None:
@@ -593,7 +719,10 @@ class RunEXEWindow(QMainWindow):
         saved_winver = self.settings.value("runtime/windows-version")
         if saved_winver:
             self._select_combo_data(self.winver_combo, str(saved_winver))
-        self.prefix_input.setText(str(self.settings.value("runtime/prefix", "")))
+        # A custom prefix belongs to one application and must never leak into
+        # the next selection. Per-app presets restore it after analysis.
+        self.prefix_input.clear()
+        self.settings.remove("runtime/prefix")
 
     @staticmethod
     def _select_combo_data(combo: QComboBox, value: Any) -> None:
@@ -628,7 +757,6 @@ class RunEXEWindow(QMainWindow):
         self.settings.setValue("runtime/backend", self.backend_combo.currentData())
         self.settings.setValue("runtime/dependencies", self.dependencies_combo.currentData())
         self.settings.setValue("runtime/windows-version", self.winver_combo.currentData())
-        self.settings.setValue("runtime/prefix", self.prefix_input.text().strip())
         super().closeEvent(event)
 
     def _set_header_status(self, text: str, state: str) -> None:
@@ -636,21 +764,34 @@ class RunEXEWindow(QMainWindow):
 
     def _update_controls(self) -> None:
         busy = bool(self._workers)
+        blocking_busy = any(key != "library" for key in self._workers)
+        library_busy = "library" in self._workers or "remove-environment" in self._workers
         running = self._application_running()
         analyzed = self.executable is not None and self.compatibility is not None
         ready = analyzed and not self.compatibility.blocking_issues
         self.progress.setVisible(busy)
-        self.analyze_button.setEnabled(self.drop_zone.path is not None and not busy)
-        self.launch_button.setEnabled(bool(ready) and not busy and not running)
-        self.prepare_button.setEnabled(bool(ready) and not busy and not running)
-        self.refresh_button.setEnabled(not busy and not running)
+        self.browse_button.setEnabled(not blocking_busy and not running)
+        self.analyze_button.setEnabled(
+            self.drop_zone.path is not None and not blocking_busy and not running
+        )
+        self.launch_button.setEnabled(bool(ready) and not blocking_busy and not running)
+        self.prepare_button.setEnabled(bool(ready) and not blocking_busy and not running)
+        self.refresh_button.setEnabled(not blocking_busy and not running)
         self.wine_config_button.setEnabled(
-            analyzed and bool(self.host and self.host.wine_installed) and not busy and not running
+            analyzed
+            and bool(self.host and self.host.wine_installed)
+            and not blocking_busy
+            and not running
         )
         self.proton_config_button.setEnabled(
-            analyzed and bool(self.host and self.host.proton_installed) and not busy and not running
+            analyzed
+            and bool(self.host and self.host.proton_installed)
+            and not blocking_busy
+            and not running
         )
-        self.proton_combo.setEnabled(bool(self.proton_installations) and not busy)
+        self.proton_combo.setEnabled(bool(self.proton_installations) and not blocking_busy)
+        self.library_refresh_button.setEnabled(not library_busy and not running)
+        self._update_library_actions()
         if running:
             self._set_header_status("Application running", "ready")
         elif busy:
@@ -705,6 +846,230 @@ class RunEXEWindow(QMainWindow):
         self.proton_combo.blockSignals(False)
         if selected:
             self._select_combo_data(self.proton_combo, selected)
+
+    def _current_preset(self) -> LaunchPreset:
+        return LaunchPreset(
+            backend=str(self.backend_combo.currentData() or "auto"),
+            proton=str(self.proton_combo.currentData())
+            if self.proton_combo.currentData()
+            else None,
+            windows_version=str(self.winver_combo.currentData())
+            if self.winver_combo.currentData()
+            else None,
+            dependencies=str(self.dependencies_combo.currentData() or "auto"),
+            prefix=self.prefix_input.text().strip() or None,
+            arguments=self.arguments_input.text().strip(),
+        )
+
+    def _restore_application_preset(self, record: ApplicationRecord) -> None:
+        preset = record.preset
+        blockers = [
+            QSignalBlocker(self.backend_combo),
+            QSignalBlocker(self.proton_combo),
+            QSignalBlocker(self.winver_combo),
+            QSignalBlocker(self.dependencies_combo),
+        ]
+        self._select_combo_data(self.backend_combo, preset.backend)
+        self._select_combo_data(self.proton_combo, preset.proton)
+        self._select_combo_data(self.winver_combo, preset.windows_version)
+        self._select_combo_data(self.dependencies_combo, preset.dependencies)
+        self.prefix_input.setText(preset.prefix or "")
+        self.arguments_input.setText(preset.arguments)
+        del blockers
+
+    def _application_display_name(self) -> str:
+        if self.executable is None:
+            return "Unknown application"
+        if self.executable.package is not None:
+            return self.executable.package.display_name or self.executable.package.identity_name
+        if self.executable.version_info is not None:
+            return (
+                self.executable.version_info.strings.get("ProductName") or self.executable.path.stem
+            )
+        return self.executable.path.stem
+
+    def _remember_current_application(self) -> None:
+        if self.executable is None:
+            return
+        preset = self._current_preset()
+        try:
+            self.application_library.remember_analysis(
+                self.executable.path,
+                display_name=self._application_display_name(),
+                architecture=self.executable.architecture,
+                file_format=self.executable.format,
+                preset=preset,
+            )
+        except OSError as error:
+            self._log(f"WARNING: Could not update application library: {error}")
+
+    def refresh_library(self) -> None:
+        def load() -> LibraryBundle:
+            return LibraryBundle(
+                self.application_library.records(),
+                discover_environments(),
+            )
+
+        self._start_task("library", "Refreshing application library", load, self._library_ready)
+
+    def _library_ready(self, bundle: LibraryBundle) -> None:
+        self._managed_environments = bundle.environments
+        self.recent_list.clear()
+        for record in bundle.applications:
+            existence = "" if record.exists else "MISSING  •  "
+            architecture = record.architecture or "unknown architecture"
+            launches = f"{record.launch_count} launch{'es' if record.launch_count != 1 else ''}"
+            item = QListWidgetItem(
+                f"{existence}{record.display_name}  •  {architecture}  •  {launches}\n{record.path}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, record.path)
+            item.setToolTip(
+                f"Last used: {record.last_used}\n"
+                f"Saved backend: {record.preset.backend}\n"
+                f"Last result: "
+                + (
+                    "not recorded"
+                    if record.last_exit_code is None
+                    else f"exit {record.last_exit_code}"
+                )
+            )
+            self.recent_list.addItem(item)
+
+        self.environment_list.clear()
+        for environment in bundle.environments:
+            state = "Ready" if environment.ready else "Incomplete"
+            item = QListWidgetItem(
+                f"{environment.application}  •  {environment.backend.upper()}  •  "
+                f"{format_size(environment.size_bytes)}  •  {state}\n{environment.path}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, environment.identifier)
+            item.setToolTip(
+                f"Runtime: {environment.runtime or environment.backend.title()}\n"
+                f"Architecture: {environment.architecture or 'unknown'}\n"
+                f"Last used: {environment.modified_at}"
+            )
+            self.environment_list.addItem(item)
+
+        total_size = sum(item.size_bytes for item in bundle.environments)
+        existing_apps = sum(record.exists for record in bundle.applications)
+        self.library_apps_metric.set_data(
+            str(len(bundle.applications)),
+            f"{existing_apps} source file(s) currently available",
+            "success" if bundle.applications else "neutral",
+        )
+        self.library_storage_metric.set_data(
+            format_size(total_size),
+            f"{len(bundle.environments)} isolated environment(s)",
+            "warning" if total_size >= 10 * 1024**3 else "neutral",
+        )
+        self._update_library_actions()
+
+    def _selected_environment(self) -> EnvironmentInfo | None:
+        item = self.environment_list.currentItem()
+        if item is None:
+            return None
+        identifier = item.data(Qt.ItemDataRole.UserRole)
+        return next(
+            (
+                environment
+                for environment in self._managed_environments
+                if environment.identifier == identifier
+            ),
+            None,
+        )
+
+    def _update_library_actions(self) -> None:
+        busy = "library" in self._workers or "remove-environment" in self._workers
+        running = self._application_running()
+        recent_selected = self.recent_list.currentItem() is not None
+        environment_selected = self._selected_environment() is not None
+        self.recent_open_button.setEnabled(recent_selected and not busy and not running)
+        self.recent_forget_button.setEnabled(recent_selected and not busy)
+        self.recent_prune_button.setEnabled(not busy)
+        self.environment_open_button.setEnabled(environment_selected and not busy)
+        self.environment_remove_button.setEnabled(environment_selected and not busy and not running)
+
+    def open_recent_application(self) -> None:
+        item = self.recent_list.currentItem()
+        if item is None:
+            return
+        path = Path(str(item.data(Qt.ItemDataRole.UserRole)))
+        if not path.exists():
+            QMessageBox.warning(
+                self,
+                "Application moved or removed",
+                f"The saved source no longer exists:\n{path}\n\n"
+                "Use Forget entry or Prune missing to remove it from the library.",
+            )
+            return
+        self._show_page(0)
+        self.analyze_path(path)
+
+    def forget_recent_application(self) -> None:
+        item = self.recent_list.currentItem()
+        if item is None:
+            return
+        path = Path(str(item.data(Qt.ItemDataRole.UserRole)))
+        try:
+            self.application_library.forget(path)
+        except OSError as error:
+            QMessageBox.critical(self, "Could not update library", str(error))
+            return
+        self.refresh_library()
+
+    def prune_missing_applications(self) -> None:
+        try:
+            removed = self.application_library.prune_missing()
+        except OSError as error:
+            QMessageBox.critical(self, "Could not update library", str(error))
+            return
+        self.task_status.setText(
+            f"Removed {removed} missing application entr{'y' if removed == 1 else 'ies'}"
+        )
+        self.refresh_library()
+
+    def open_environment_folder(self) -> None:
+        environment = self._selected_environment()
+        if environment is None:
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(environment.path))):
+            QMessageBox.warning(
+                self, "Could not open folder", f"Open this path manually:\n{environment.path}"
+            )
+
+    def remove_selected_environment(self) -> None:
+        environment = self._selected_environment()
+        if environment is None:
+            return
+        answer = QMessageBox.warning(
+            self,
+            "Remove isolated environment?",
+            f"This permanently removes {environment.application}'s "
+            f"{format_size(environment.size_bytes)} {environment.backend} environment.\n\n"
+            "Windows-side settings, saves, and installed components inside the prefix may be "
+            "lost. The original application file is not removed.\n\n"
+            f"{environment.path}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        def remove() -> str:
+            remove_managed_environment(environment.path)
+            return environment.identifier
+
+        self._start_task(
+            "remove-environment",
+            f"Removing {environment.application}'s isolated environment",
+            remove,
+            self._environment_removed,
+        )
+
+    def _environment_removed(self, identifier: str) -> None:
+        self._log(f"Removed managed environment: {identifier}")
+        self.task_status.setText(f"Removed {identifier}")
+        self.refresh_library()
 
     def _update_analysis_view(self) -> None:
         executable = self.executable
@@ -896,10 +1261,38 @@ class RunEXEWindow(QMainWindow):
         self.analyze_path(self.drop_zone.path)
 
     def analyze_path(self, path: Path) -> None:
+        if self._application_running():
+            QMessageBox.information(
+                self,
+                "Application still running",
+                "Close the launched application before switching to another entry.",
+            )
+            return
         resolved = path.expanduser().resolve()
         self.source_path = resolved
         self.drop_zone.set_path(resolved)
-        preference = str(self.backend_combo.currentData())
+        saved_record = self.application_library.get(resolved)
+        if saved_record is not None:
+            preference = saved_record.preset.backend
+        else:
+            blockers = [
+                QSignalBlocker(self.backend_combo),
+                QSignalBlocker(self.winver_combo),
+                QSignalBlocker(self.dependencies_combo),
+            ]
+            self._select_combo_data(
+                self.backend_combo, str(self.settings.value("runtime/backend", "auto"))
+            )
+            self._select_combo_data(
+                self.dependencies_combo,
+                str(self.settings.value("runtime/dependencies", "auto")),
+            )
+            saved_winver = self.settings.value("runtime/windows-version")
+            self._select_combo_data(self.winver_combo, str(saved_winver) if saved_winver else None)
+            self.prefix_input.clear()
+            self.arguments_input.clear()
+            preference = str(self.backend_combo.currentData())
+            del blockers
 
         def inspect() -> AnalysisBundle:
             executable = analyze_executable(resolved)
@@ -920,13 +1313,19 @@ class RunEXEWindow(QMainWindow):
         self.compatibility = bundle.compatibility
         self.proton_installations = bundle.proton_installations
         self._set_proton_installations(bundle.proton_installations)
+        saved_record = self.application_library.get(bundle.source)
+        if saved_record is not None:
+            self._restore_application_preset(saved_record)
         self._update_runtime_metrics()
         self._update_analysis_view()
+        self._remember_current_application()
         self._log(
             f"Analysis complete: {bundle.compatibility.architecture}, "
             f"{bundle.compatibility.backend}, "
             f"{len(bundle.compatibility.blocking_issues)} blocker(s)."
         )
+        if self.auto_refresh:
+            QTimer.singleShot(0, self.refresh_library)
 
     def refresh_runtimes(self) -> None:
         def detect() -> tuple[HostInfo, list[ProtonInstallation]]:
@@ -997,6 +1396,7 @@ class RunEXEWindow(QMainWindow):
         self._start_task("prepare", "Preparing isolated environment", prepare, self._prepared)
 
     def _prepared(self, prepared: PreparedEnvironment) -> None:
+        self._remember_current_application()
         self._log(
             f"Environment ready: {prepared.runtime_name} at {prepared.path} ({prepared.wine_arch})."
         )
@@ -1082,6 +1482,8 @@ class RunEXEWindow(QMainWindow):
         process.finished.connect(self._application_finished)
         process.errorOccurred.connect(self._application_error)
         self.application_process = process
+        self._active_launch_path = executable.path
+        self._active_launch_preset = self._current_preset()
         self._application_output.clear()
         process.start()
         self._update_controls()
@@ -1104,6 +1506,13 @@ class RunEXEWindow(QMainWindow):
 
     def _application_started(self) -> None:
         assert self.executable is not None
+        if self._active_launch_path is not None and self._active_launch_preset is not None:
+            try:
+                self.application_library.record_launch(
+                    self._active_launch_path, self._active_launch_preset
+                )
+            except OSError as error:
+                self._log(f"WARNING: Could not save launch preset: {error}")
         self._log(f"Application started: {self.executable.path.name}")
         self.task_status.setText("Application is running")
         self._update_controls()
@@ -1117,6 +1526,13 @@ class RunEXEWindow(QMainWindow):
             exit_code,
             self.compatibility.profile if self.compatibility is not None else None,
         )
+        if self._active_launch_path is not None:
+            try:
+                self.application_library.record_exit(self._active_launch_path, exit_code)
+            except OSError as error:
+                self._log(f"WARNING: Could not save launch result: {error}")
+        self._active_launch_path = None
+        self._active_launch_preset = None
         self.application_process = None
         self.task_status.setText("Ready")
         if diagnostic is not None:
@@ -1152,6 +1568,8 @@ class RunEXEWindow(QMainWindow):
             )
             self.application_process.deleteLater()
             self.application_process = None
+            self._active_launch_path = None
+            self._active_launch_preset = None
             self.task_status.setText("Ready")
             self._set_header_status("Application failed", "error")
             self._update_controls()
@@ -1159,6 +1577,49 @@ class RunEXEWindow(QMainWindow):
     def copy_activity(self) -> None:
         QApplication.clipboard().setText(self.activity_log.toPlainText())
         self.task_status.setText("Activity copied to clipboard")
+
+    def export_support_report(self) -> None:
+        source_name = self.source_path.stem if self.source_path is not None else "session"
+        suggested = Path.home() / f"runexe-{source_name}-report.json"
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Export RunEXE support report",
+            str(suggested),
+            "JSON report (*.json);;All files (*)",
+        )
+        if not selected:
+            return
+        payload = {
+            "schema": 1,
+            "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "runexe_version": __version__,
+            "source": str(self.source_path) if self.source_path is not None else None,
+            "executable": asdict(self.executable) if self.executable is not None else None,
+            "compatibility": (
+                asdict(self.compatibility) if self.compatibility is not None else None
+            ),
+            "host": asdict(self.host) if self.host is not None else None,
+            "launch_preset": asdict(self._current_preset()),
+            "managed_environments": [item.as_dict() for item in self._managed_environments],
+            "activity": self.activity_log.toPlainText().splitlines(),
+        }
+        target = Path(selected).expanduser()
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(payload, indent=2, default=str) + "\n",
+                encoding="utf-8",
+            )
+            if os.name == "posix":
+                temporary.chmod(0o600)
+            temporary.replace(target)
+        except OSError as error:
+            QMessageBox.critical(self, "Could not export report", str(error))
+            return
+        finally:
+            temporary.unlink(missing_ok=True)
+        self._log(f"Exported support report: {target}")
+        self.task_status.setText(f"Report saved to {target}")
 
     def clear_activity(self) -> None:
         self.activity_log.clear()

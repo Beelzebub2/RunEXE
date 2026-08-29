@@ -1,3 +1,4 @@
+import json
 import subprocess
 from unittest.mock import patch
 
@@ -115,6 +116,32 @@ def test_prepares_wine_without_launching(require, ensure, tmp_path):
     assert prepared.path == prefix.resolve()
     assert prepared.launcher == "/usr/bin/wine"
     ensure.assert_called_once_with(prefix.resolve(), "win64", verbose=False)
+
+
+@patch("runexe.runner._require_binary", return_value="/usr/bin/wine")
+def test_prepared_environment_writes_inventory_metadata(require, tmp_path, monkeypatch):
+    path = tmp_path / "Editor.exe"
+    path.touch()
+    prefix = tmp_path / "prefix"
+
+    def fake_ensure(target, _architecture, verbose=False):
+        (target / "drive_c").mkdir(parents=True)
+
+    monkeypatch.setattr("runexe.runner.ensure_prefix", fake_ensure)
+    monkeypatch.setattr("runexe.runner.set_windows_version", lambda *_args, **_kwargs: None)
+
+    prepare_environment(
+        ExecutableInfo(path, True),
+        report(),
+        prefix=prefix,
+        install_dependencies=False,
+        winver="11",
+    )
+
+    metadata = json.loads((prefix / ".runexe-environment.json").read_text(encoding="utf-8"))
+    assert metadata["application"] == "Editor"
+    assert metadata["backend"] == "wine"
+    assert metadata["windows_version"] == "11"
 
 
 def test_builds_launch_spec_for_gui_process(tmp_path):

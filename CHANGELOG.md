@@ -2,6 +2,46 @@
 
 All notable RunEXE changes are documented here.
 
+## [0.5.0] - 2026-08-29
+
+### Added
+
+- A bounded local recent-application library stored under `XDG_STATE_HOME`,
+  with atomic updates, corruption recovery, missing-source pruning, and CLI
+  JSON output.
+- Per-application launch presets for backend, Proton build, reported Windows
+  version, dependency policy, custom prefix, and arguments.
+- A fourth scalable GUI page for reopening recent software and inspecting
+  RunEXE-owned Wine prefixes and Proton compat-data directories.
+- Managed-environment metadata, readiness, disk-usage inventory, folder access,
+  and guarded removal that accepts only direct children of RunEXE data roots.
+- `runexe recent`, `runexe rerun`, `runexe forget-recent`, `runexe environments`,
+  and the explicitly confirmed `runexe remove-environment IDENTIFIER --yes`
+  console workflows.
+- Exportable GUI support reports containing the active analysis, compatibility
+  result, host state, launch preset, environment inventory, and activity log.
+
+### Changed
+
+- Custom environment paths are now per-application instead of a global GUI
+  preference, preventing one application's prefix from leaking into another.
+- The GUI prevents switching the analyzed source while a launched application
+  is still running and performs environment inventory work off the UI thread.
+- Successfully prepared environments receive best-effort metadata without
+  allowing metadata failures to block application launch.
+
+### Safety
+
+- Environment cleanup rejects symlinks, nested paths, custom prefixes, and any
+  target outside the two RunEXE-managed roots. The GUI warns that prefixes may
+  contain Windows-side saves and settings before requesting confirmation.
+
+### Verification
+
+- 71 automated tests cover library persistence and recovery, per-app preset
+  restoration, environment discovery and size reporting, direct-child deletion
+  guards, CLI launch integration, and the four-page GUI shell.
+
 ## [0.4.3] - 2026-08-29
 
 ### Added

@@ -8,6 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .environments import write_environment_metadata
 from .models import CompatibilityReport, ExecutableInfo
 from .pe_utils import run_with_progress
 from .platform_support import find_executable, install_hint
@@ -67,6 +68,33 @@ class LaunchSpec:
 def _verbose(enabled: bool, message: str) -> None:
     if enabled:
         print(f"[runexe] {message}")
+
+
+def _record_environment(
+    prepared: PreparedEnvironment,
+    executable: Path,
+    architecture: str,
+    windows_version: str | None,
+    verbose: bool,
+) -> None:
+    ready_path = (
+        prepared.path / "pfx" / "drive_c"
+        if prepared.backend == "proton"
+        else prepared.path / "drive_c"
+    )
+    if not ready_path.is_dir():
+        return
+    try:
+        write_environment_metadata(
+            prepared.path,
+            backend=prepared.backend,
+            source=executable,
+            architecture=architecture,
+            runtime=prepared.runtime_name,
+            windows_version=windows_version,
+        )
+    except OSError as error:
+        _verbose(verbose, f"Could not update environment metadata: {error}")
 
 
 def _require_binary(name: str) -> str:
@@ -463,7 +491,7 @@ def prepare_environment(
         if winver is not None:
             set_proton_windows_version(installation, data_path, executable_path, winver, verbose)
 
-        return PreparedEnvironment(
+        prepared = PreparedEnvironment(
             backend="proton",
             path=data_path,
             runtime_name=installation.name,
@@ -471,6 +499,8 @@ def prepare_environment(
             wine_arch="win64",
             proton_installation=installation,
         )
+        _record_environment(prepared, executable_path, compatibility.architecture, winver, verbose)
+        return prepared
 
     wine_arch = compatibility.wine_arch
     if wine_arch is None:
@@ -498,13 +528,15 @@ def prepare_environment(
     if winver is not None:
         set_windows_version(wine_prefix, wine_arch, winver, verbose=verbose)
 
-    return PreparedEnvironment(
+    prepared = PreparedEnvironment(
         backend="wine",
         path=wine_prefix,
         runtime_name="Wine",
         launcher=wine_binary,
         wine_arch=wine_arch,
     )
+    _record_environment(prepared, executable_path, compatibility.architecture, winver, verbose)
+    return prepared
 
 
 def open_runtime_configuration(

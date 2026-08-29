@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -11,7 +12,8 @@ from PySide6.QtWidgets import QApplication
 from runexe.analyzer import analyze_executable
 from runexe.compatibility import analyze_compatibility
 from runexe.gui.widgets import DropZone, SmoothScrollArea
-from runexe.gui.window import AnalysisBundle, RunEXEWindow
+from runexe.gui.window import AnalysisBundle, LibraryBundle, RunEXEWindow
+from runexe.library import ApplicationLibrary, LaunchPreset
 from runexe.models import HostInfo
 
 from .helpers import make_pe
@@ -26,10 +28,11 @@ def qt_app():
 def test_desktop_shell_has_expandable_pages(qt_app):
     window = RunEXEWindow(auto_refresh=False)
 
-    assert window.pages.count() == 3
+    assert window.pages.count() == 4
     assert [button.text() for button in window.nav_buttons] == [
         "Overview",
         "Runtime setup",
+        "Library",
         "Activity",
     ]
     assert window.minimumWidth() <= 920
@@ -42,7 +45,10 @@ def test_analysis_updates_readiness_and_runtime_state(qt_app, tmp_path):
     executable = analyze_executable(path)
     host = HostInfo("x86_64", False, None, None, None, False)
     report = analyze_compatibility(executable, host)
-    window = RunEXEWindow(auto_refresh=False)
+    window = RunEXEWindow(
+        auto_refresh=False,
+        application_library=ApplicationLibrary(tmp_path / "library.json"),
+    )
 
     window._analysis_ready(AnalysisBundle(path, executable, host, report, []))
 
@@ -71,7 +77,10 @@ def test_paint_net_profile_applies_windows_11_setup(qt_app, tmp_path):
     executable = analyze_executable(path)
     host = HostInfo("x86_64", True, "wine-11", True, True, True)
     report = analyze_compatibility(executable, host)
-    window = RunEXEWindow(auto_refresh=False)
+    window = RunEXEWindow(
+        auto_refresh=False,
+        application_library=ApplicationLibrary(tmp_path / "library.json"),
+    )
 
     window._analysis_ready(AnalysisBundle(path, executable, host, report, []))
 
@@ -90,4 +99,60 @@ def test_paint_net_profile_applies_windows_11_setup(qt_app, tmp_path):
     assert window.runtime_scroll.viewport().autoFillBackground()
     assert window.winver_combo.view().viewport().autoFillBackground()
     assert window.winver_combo.view().viewport().objectName() == "comboPopupViewport"
+    window.deleteLater()
+
+
+def test_library_restores_per_application_preset(qt_app, tmp_path):
+    path = make_pe(tmp_path / "sample.exe", machine=0x8664)
+    executable = analyze_executable(path)
+    host = HostInfo("x86_64", True, "wine-11", True, True, True)
+    report = analyze_compatibility(executable, host)
+    library = ApplicationLibrary(tmp_path / "library.json")
+    preset = LaunchPreset(
+        backend="wine",
+        windows_version="10",
+        dependencies="skip",
+        arguments="--portable",
+    )
+    record = library.remember_analysis(
+        path,
+        display_name="Sample",
+        architecture="x86_64",
+        file_format=executable.format,
+        preset=preset,
+    )
+    window = RunEXEWindow(auto_refresh=False, application_library=library)
+
+    window._analysis_ready(AnalysisBundle(path, executable, host, report, []))
+    window._library_ready(LibraryBundle([record], []))
+
+    assert window.winver_combo.currentData() == "10"
+    assert window.dependencies_combo.currentData() == "skip"
+    assert window.arguments_input.text() == "--portable"
+    assert window.recent_list.count() == 1
+    assert "Sample" in window.recent_list.item(0).text()
+    assert window.library_apps_metric.value.text() == "1"
+    window.deleteLater()
+
+
+def test_activity_support_report_exports_local_session(qt_app, tmp_path, monkeypatch):
+    target = tmp_path / "support.json"
+    window = RunEXEWindow(
+        auto_refresh=False,
+        application_library=ApplicationLibrary(tmp_path / "library.json"),
+    )
+    window.activity_log.appendPlainText("Example diagnostic")
+    monkeypatch.setattr(
+        "runexe.gui.window.QFileDialog.getSaveFileName",
+        lambda *_args, **_kwargs: (str(target), "JSON report (*.json)"),
+    )
+
+    window.export_support_report()
+
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["schema"] == 1
+    assert payload["source"] is None
+    assert payload["activity"] == ["Example diagnostic"]
+    assert payload["launch_preset"]["backend"] in {"auto", "wine", "proton"}
+    assert list(tmp_path.glob(".*.tmp")) == []
     window.deleteLater()

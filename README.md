@@ -26,6 +26,9 @@ The Qt desktop application is the easiest way to use RunEXE. It includes:
 - Automatic Wine/Proton selection with manual overrides when needed
 - One-click isolated environment preparation and native Wine/Proton settings
 - Persistent runtime preferences, keyboard shortcuts, and an in-app activity log
+- A recent-application library that restores each app's own launch choices
+- Managed-environment disk usage, folder access, and guarded cleanup
+- Exportable JSON support reports for troubleshooting
 - Live application output without blocking the interface
 - Smooth wheel/touch scrolling, subtle page and metric transitions, and responsive action layouts
 - Compatibility presets that detect known requirements such as Paint.NET's minimum Windows build
@@ -88,6 +91,9 @@ More compatibility data is one of the long-term goals of the project (see [Roadm
 - **Native Wine execution** - launches from the application directory and preserves arguments, stdout, stderr, timeouts, and exit codes
 - **Polished terminal UI** - readable launch plans, compact tables, clear status language, and a terminal mark derived from the project logo
 - **Scalable desktop GUI** - responsive Qt layouts, drag and drop, runtime configuration, live logs, persistent preferences, and background tasks
+- **Application library** - reopens recent software and restores its last launch choices without sharing custom prefixes between apps
+- **Environment manager** - inventories RunEXE-owned Wine/Proton environments, reports disk use, opens their folders, and removes only validated managed paths
+- **Support report export** - saves the current analysis, compatibility decision, host state, launch preset, environment inventory, and activity log as JSON
 - **Automation-friendly reports** - emits the full analysis and compatibility result as JSON
 
 ## 📋 Requirements
@@ -231,6 +237,34 @@ runexe doctor --no-gui
 runexe doctor --json
 ```
 
+List the local application library and RunEXE-owned environments:
+
+```bash
+runexe recent
+runexe recent --json
+runexe recent --prune-missing
+runexe rerun APPLICATION_ID
+runexe forget-recent APPLICATION_ID
+
+runexe environments
+runexe environments --json
+```
+
+Environment deletion is intentionally explicit because a prefix can contain
+Windows-side settings or save files. RunEXE accepts only the exact identifier
+from `runexe environments`, validates that it is a direct child of a managed
+RunEXE directory, and requires `--yes`:
+
+```bash
+runexe remove-environment wine:example-0123456789 --yes
+```
+
+Recent application state is stored under
+`$XDG_STATE_HOME/runexe/applications.json` (normally
+`~/.local/state/runexe/applications.json`). It is bounded, private to the local
+machine, and never uploaded. The GUI's Activity page exports a support report
+only when you deliberately choose a destination.
+
 `--backend auto` is the default. It prefers Proton for detected games and Wine
 for regular applications, then falls back to whichever runtime is available.
 `--proton` implies the Proton backend. `RUNEXE_PROTON_PATH` can point to a custom
@@ -284,13 +318,26 @@ runexe version
 - [x] Live non-blocking application output
 - [x] Persistent desktop preferences and keyboard navigation
 - [x] Paint.NET profile with automatic modern-Windows requirement handling
-- [ ] Desktop notifications and recent-application history
+- [ ] Desktop notifications
+- [x] Recent-application history and per-app launch presets
 - [ ] More Windows runtime detection
 - [ ] Better DirectX dependency detection
 - [ ] GPU/Vulkan capability detection
 - [ ] DXVK detection
 - [ ] More robust application classification
 - [ ] Improved Wine configuration
+
+### v0.5.x
+
+- [x] Recent-application library shared by GUI and CLI
+- [x] One-command relaunch from saved CLI presets
+- [x] Persistent per-app runtime, Windows version, dependency, prefix, and argument presets
+- [x] Managed Wine/Proton environment inventory with disk usage
+- [x] Guarded cleanup restricted to RunEXE-owned environment paths
+- [x] Exportable GUI support reports
+- [ ] Optional Proton runtime tuning presets for advanced troubleshooting
+- [ ] Prefix backup and restore before destructive maintenance
+- [ ] Vulkan/GPU readiness reporting for DirectX translation
 
 ### Future
 
@@ -306,6 +353,9 @@ runexe version
 - AppX/MSIX archives are extracted into `$XDG_CACHE_HOME/runexe/packages` (or `~/.cache/runexe/packages`) for reuse. Package signatures are not verified; only run packages you trust.
 - Package identity and Microsoft Store services are not recreated. Classic Win32 applications distributed inside AppX/MSIX may work, while UWP/Store-only features may still fail under Wine.
 - Wine is a compatibility layer, **not a security sandbox**. Only run executables you trust; use a VM or a dedicated sandbox for untrusted software.
+- Wine/Proton prefixes may contain application settings and save data. Inspect
+  or back up important files before environment removal; RunEXE never removes
+  the original EXE/AppX/MSIX source.
 - Anti-cheat detection is a best-effort signal based on known import names (see `constants.py`); it is not exhaustive and deliberately does not attempt to detect wrapper/VM-based DRM such as Denuvo. [Proton support for EAC and BattlEye is enabled per title](https://partner.steamgames.com/doc/steamhardware/proton), so these detections are warnings rather than automatic blockers.
 - Game detection is heuristic. Use `--backend wine` or `--backend proton` whenever you know which runtime the application needs.
 - RunEXE launches Proton directly through its `proton run` interface with isolated compat data. Valve primarily designs Proton for use through Steam, so a particular title may still depend on Steam runtime services or launch configuration.

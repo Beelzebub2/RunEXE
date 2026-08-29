@@ -1,7 +1,11 @@
+from datetime import datetime, timezone
+
 from typer.testing import CliRunner
 
 from runexe import __version__
 from runexe.cli import app
+from runexe.environments import EnvironmentInfo
+from runexe.library import ApplicationLibrary, LaunchPreset
 from runexe.models import ApplicationProfile, CompatibilityReport, ExecutableInfo, HostInfo
 from runexe.runner import LaunchResult
 
@@ -45,6 +49,7 @@ def test_run_forwards_every_argument_after_separator(tmp_path, monkeypatch):
     monkeypatch.setattr("runexe.cli.analyze_executable", lambda _: executable)
     monkeypatch.setattr("runexe.cli.detect_host", lambda: host)
     monkeypatch.setattr("runexe.cli.analyze_compatibility", lambda *_: compatibility)
+    monkeypatch.setattr("runexe.cli._remember_launch", lambda *_: None)
 
     def fake_launch(*args, **kwargs):
         seen.update(kwargs)
@@ -112,6 +117,7 @@ def test_run_uses_profile_windows_version_when_not_overridden(tmp_path, monkeypa
     monkeypatch.setattr("runexe.cli.analyze_executable", lambda _: executable)
     monkeypatch.setattr("runexe.cli.detect_host", lambda: host)
     monkeypatch.setattr("runexe.cli.analyze_compatibility", lambda *_: compatibility)
+    monkeypatch.setattr("runexe.cli._remember_launch", lambda *_: None)
 
     def fake_launch(*args, **kwargs):
         seen.update(kwargs)
@@ -123,3 +129,91 @@ def test_run_uses_profile_windows_version_when_not_overridden(tmp_path, monkeypa
 
     assert result.exit_code == 0
     assert seen["winver"] == "11"
+
+
+def test_recent_command_emits_saved_presets_as_json(tmp_path, monkeypatch):
+    source = tmp_path / "app.exe"
+    source.touch()
+    library = ApplicationLibrary(tmp_path / "applications.json")
+    library.remember_analysis(
+        source,
+        display_name="Example",
+        architecture="x86_64",
+        file_format="PE32+",
+        preset=LaunchPreset(backend="wine", windows_version="11"),
+    )
+    monkeypatch.setattr("runexe.cli.ApplicationLibrary", lambda: library)
+
+    result = runner.invoke(app, ["recent", "--json"])
+
+    assert result.exit_code == 0
+    assert '"display_name": "Example"' in result.stdout
+    assert '"windows_version": "11"' in result.stdout
+
+
+def test_environment_command_and_removal_confirmation(tmp_path, monkeypatch):
+    path = tmp_path / "prefixes" / "example-123"
+    path.mkdir(parents=True)
+    environment = EnvironmentInfo(
+        identifier="wine:example-123",
+        backend="wine",
+        path=path,
+        application="Example",
+        source=str(tmp_path / "app.exe"),
+        architecture="x86_64",
+        runtime="Wine 11",
+        windows_version="11",
+        size_bytes=2048,
+        modified_at=datetime.now(timezone.utc).isoformat(),
+        ready=True,
+    )
+    monkeypatch.setattr("runexe.cli.discover_environments", lambda: [environment])
+
+    listing = runner.invoke(app, ["environments", "--json"])
+    removal = runner.invoke(app, ["remove-environment", environment.identifier])
+
+    assert listing.exit_code == 0
+    assert '"identifier": "wine:example-123"' in listing.stdout
+    assert removal.exit_code == 2
+    assert "permanently removes" in removal.stdout
+    assert "--yes" in removal.stdout
+
+
+def test_rerun_restores_saved_cli_preset(tmp_path, monkeypatch):
+    source = tmp_path / "app.exe"
+    source.touch()
+    library = ApplicationLibrary(tmp_path / "applications.json")
+    record = library.remember_analysis(
+        source,
+        display_name="Example",
+        architecture="x86_64",
+        file_format="PE32+",
+        preset=LaunchPreset(
+            backend="wine",
+            windows_version="11",
+            dependencies="skip",
+            arguments="--portable 'two words'",
+        ),
+    )
+    seen = {}
+
+    def fake_run(ctx, file, backend, proton, prefix, dependencies, winver, timeout, verbose):
+        seen.update(
+            file=file,
+            backend=backend,
+            dependencies=dependencies,
+            winver=winver,
+            arguments=list(ctx.args),
+        )
+
+    monkeypatch.setattr("runexe.cli.ApplicationLibrary", lambda: library)
+    monkeypatch.setattr("runexe.cli.run", fake_run)
+
+    result = runner.invoke(app, ["rerun", record.identifier])
+
+    assert result.exit_code == 0
+    assert seen["file"] == source.resolve()
+    assert seen["backend"].value == "wine"
+    assert seen["dependencies"] is False
+    assert seen["winver"] == "11"
+    assert seen["arguments"] == ["--portable", "two words"]
