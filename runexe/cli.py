@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import asdict, replace
 from enum import Enum
 from pathlib import Path
@@ -14,7 +15,9 @@ from runexe import __version__
 from runexe.analyzer import analyze_executable
 from runexe.compatibility import analyze_compatibility
 from runexe.diagnostics import collect_diagnostics
+from runexe.environments import discover_environments, format_size, remove_managed_environment
 from runexe.host import detect_host
+from runexe.library import ApplicationLibrary, LaunchPreset
 from runexe.profiles import detect_runtime_issue
 from runexe.proton import ProtonError, discover_proton_installations, select_proton
 from runexe.resources import extract_requested_execution_level
@@ -60,6 +63,31 @@ def _analysis_as_dict(result, compatibility, host) -> dict:
 def _fail(message: str, code: int = 1) -> None:
     print_error(message)
     raise typer.Exit(code=code)
+
+
+def _display_name(executable) -> str:
+    if executable.package is not None:
+        return executable.package.display_name or executable.package.identity_name
+    if executable.version_info is not None:
+        return executable.version_info.strings.get("ProductName") or executable.path.stem
+    return executable.path.stem
+
+
+def _remember_launch(executable, preset: LaunchPreset) -> ApplicationLibrary | None:
+    library = ApplicationLibrary()
+    try:
+        library.remember_analysis(
+            executable.path,
+            display_name=_display_name(executable),
+            architecture=executable.architecture,
+            file_format=executable.format,
+            preset=preset,
+        )
+        library.record_launch(executable.path, preset)
+    except OSError as error:
+        print_warning(f"Could not update recent applications: {error}")
+        return None
+    return library
 
 
 def _runtime_host_with_selector(host, selector: str | None):
@@ -287,6 +315,16 @@ def run(
             if compatibility.profile is not None
             else None
         )
+        preset = LaunchPreset(
+            backend=preference.value,
+            proton=proton,
+            windows_version=effective_winver,
+            dependencies=(
+                "auto" if dependencies is None else "install" if dependencies else "skip"
+            ),
+            prefix=str(prefix.expanduser()) if prefix is not None else None,
+            arguments=shlex.join(list(ctx.args)),
+        )
 
         print_banner(f"Launch | {result.path.name}")
         plan_rows: list[tuple[str, object]] = [
@@ -326,6 +364,7 @@ def run(
                 "use --deps to opt in."
             )
 
+        application_library = _remember_launch(result, preset)
         launch_result: LaunchResult = launch(
             result,
             compatibility,
@@ -337,6 +376,11 @@ def run(
             install_dependencies=install_dependencies,
             proton=selected_proton.script if selected_proton else proton,
         )
+        if application_library is not None and launch_result.exit_code is not None:
+            try:
+                application_library.record_exit(result.path, launch_result.exit_code)
+            except OSError as error:
+                print_warning(f"Could not save the launch result: {error}")
 
         if launch_result.stdout:
             console.print(
@@ -439,6 +483,198 @@ def doctor(
                 print_hint(f"{check.name}: {check.fix}")
     if not report.ready:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def recent(
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit the application library as JSON.")
+    ] = False,
+    prune_missing: Annotated[
+        bool,
+        typer.Option("--prune-missing", help="Forget entries whose source file no longer exists."),
+    ] = False,
+) -> None:
+    """List recently analyzed or launched applications and their saved presets."""
+
+    library = ApplicationLibrary()
+    if prune_missing:
+        try:
+            removed = library.prune_missing()
+        except OSError as error:
+            _fail(f"Could not update the application library: {error}")
+        if not json_output:
+            print_success(
+                f"Removed {removed} missing application entr{'y' if removed == 1 else 'ies'}."
+            )
+    records = library.records()
+    if json_output:
+        typer.echo(json.dumps([asdict(record) for record in records], indent=2))
+        return
+    print_banner("Recent applications | per-app launch choices are stored locally")
+    if not records:
+        print_hint("Launch an application from the GUI or CLI to add it here.")
+        return
+    print_table(
+        "Application library",
+        (
+            ("ID", "left"),
+            ("Application", "left"),
+            ("Backend", "left"),
+            ("Launches", "right"),
+            ("Last result", "left"),
+            ("Path", "left"),
+        ),
+        (
+            (
+                record.identifier,
+                record.display_name,
+                record.preset.backend,
+                record.launch_count,
+                "not launched"
+                if record.last_exit_code is None
+                else f"exit {record.last_exit_code}",
+                record.path,
+            )
+            for record in records
+        ),
+    )
+    print_hint("Relaunch a saved preset with: runexe rerun ID")
+
+
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def rerun(
+    ctx: typer.Context,
+    identifier: Annotated[str, typer.Argument(help="Application ID from runexe recent.")],
+    timeout: Annotated[
+        int | None, typer.Option("--timeout", min=1, help="Maximum runtime in seconds.")
+    ] = None,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Show runtime commands.")
+    ] = False,
+) -> None:
+    """Launch a recent application with its saved per-app preset."""
+
+    record = next(
+        (item for item in ApplicationLibrary().records() if item.identifier == identifier),
+        None,
+    )
+    if record is None:
+        _fail(f"No recent application matches '{identifier}'.")
+    source = Path(record.path)
+    if not source.exists():
+        _fail(f"Saved application source no longer exists: {source}")
+    preset = record.preset
+    try:
+        saved_arguments = shlex.split(preset.arguments)
+    except ValueError as error:
+        _fail(f"Saved arguments are invalid: {error}")
+    if not ctx.args:
+        ctx.args = saved_arguments
+    dependencies = {
+        "auto": None,
+        "install": True,
+        "skip": False,
+    }[preset.dependencies]
+    run(
+        ctx,
+        source,
+        BackendChoice(preset.backend),
+        preset.proton,
+        Path(preset.prefix) if preset.prefix else None,
+        dependencies,
+        preset.windows_version,
+        timeout,
+        verbose,
+    )
+
+
+@app.command(name="forget-recent")
+def forget_recent(
+    identifier: Annotated[str, typer.Argument(help="Application ID from runexe recent.")],
+) -> None:
+    """Forget one recent entry without deleting its source or environment."""
+
+    library = ApplicationLibrary()
+    record = next((item for item in library.records() if item.identifier == identifier), None)
+    if record is None:
+        _fail(f"No recent application matches '{identifier}'.")
+    try:
+        library.forget(record.path)
+    except OSError as error:
+        _fail(f"Could not update the application library: {error}")
+    print_success(f"Forgot {record.display_name}; no application files were removed.")
+
+
+@app.command()
+def environments(
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit managed environment inventory as JSON.")
+    ] = False,
+) -> None:
+    """List isolated Wine prefixes and Proton compat-data owned by RunEXE."""
+
+    items = discover_environments()
+    if json_output:
+        typer.echo(json.dumps([item.as_dict() for item in items], indent=2))
+        return
+    print_banner("Managed environments | only RunEXE-owned locations are listed")
+    if not items:
+        print_hint("Prepare or launch an application to create an isolated environment.")
+        return
+    print_table(
+        "Isolated environments",
+        (
+            ("Identifier", "left"),
+            ("Application", "left"),
+            ("Runtime", "left"),
+            ("Size", "right"),
+            ("State", "left"),
+            ("Path", "left"),
+        ),
+        (
+            (
+                item.identifier,
+                item.application,
+                item.runtime or item.backend.title(),
+                format_size(item.size_bytes),
+                "ready" if item.ready else "incomplete",
+                item.path,
+            )
+            for item in items
+        ),
+    )
+    print_hint("Remove one explicitly with: runexe remove-environment IDENTIFIER --yes")
+
+
+@app.command(name="remove-environment")
+def remove_environment(
+    identifier: Annotated[
+        str, typer.Argument(help="Exact wine:NAME/proton:NAME identifier from runexe environments.")
+    ],
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Confirm permanent removal of this managed environment."),
+    ] = False,
+) -> None:
+    """Permanently remove one validated RunEXE-managed environment."""
+
+    matches = [item for item in discover_environments() if item.identifier == identifier]
+    if not matches:
+        _fail(f"No managed environment matches '{identifier}'.")
+    item = matches[0]
+    if not yes:
+        print_warning(
+            f"This permanently removes {item.application}'s {format_size(item.size_bytes)} "
+            f"{item.backend} environment at {item.path}."
+        )
+        print_hint(f"Repeat with: runexe remove-environment {identifier} --yes")
+        raise typer.Exit(code=2)
+    try:
+        remove_managed_environment(item.path)
+    except (OSError, ValueError) as error:
+        _fail(str(error))
+    print_success(f"Removed {identifier}.")
 
 
 @app.command(name="backends")

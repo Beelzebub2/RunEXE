@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 # Native Windows rendering is required for the bundled Segoe UI font.  Headless
 # Linux builders can still refresh the screenshot with Qt's offscreen backend.
@@ -15,7 +16,8 @@ from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication
 
 from runexe.gui.theme import apply_theme
-from runexe.gui.window import AnalysisBundle, RunEXEWindow
+from runexe.gui.window import AnalysisBundle, LibraryBundle, RunEXEWindow
+from runexe.library import ApplicationLibrary
 from runexe.models import CompatibilityReport, ExecutableInfo, HostInfo, VersionInfo
 from runexe.proton import ProtonInstallation
 
@@ -61,19 +63,32 @@ def main() -> None:
         Path.home() / ".steam" / "root",
     )
 
-    window = RunEXEWindow(auto_refresh=False)
-    window.resize(1180, 790)
-    window._analysis_ready(AnalysisBundle(source, executable, host, compatibility, [proton]))
-    window.show()
-    app.processEvents()
-    settle = QEventLoop()
-    QTimer.singleShot(260, settle.quit)
-    settle.exec()
-    target = Path(__file__).resolve().parent.parent / "assets" / "runexe-gui.png"
-    if not window.grab().save(str(target), "PNG"):
-        raise RuntimeError(f"Could not save GUI screenshot to {target}")
-    print(target)
-    window.close()
+    with TemporaryDirectory(prefix="runexe-screenshot-") as temporary:
+        window = RunEXEWindow(
+            auto_refresh=False,
+            application_library=ApplicationLibrary(Path(temporary) / "library.json"),
+        )
+        window.resize(1180, 790)
+        window._analysis_ready(AnalysisBundle(source, executable, host, compatibility, [proton]))
+        if os.environ.get("RUNEXE_SCREENSHOT_PAGE") == "library":
+            window._library_ready(LibraryBundle(window.application_library.records(), []))
+            window._show_page(2)
+        window.show()
+        app.processEvents()
+        settle = QEventLoop()
+        QTimer.singleShot(260, settle.quit)
+        settle.exec()
+        configured_target = os.environ.get("RUNEXE_SCREENSHOT_TARGET")
+        target = (
+            Path(configured_target).expanduser().resolve()
+            if configured_target
+            else Path(__file__).resolve().parent.parent / "assets" / "runexe-gui.png"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not window.grab().save(str(target), "PNG"):
+            raise RuntimeError(f"Could not save GUI screenshot to {target}")
+        print(target)
+        window.close()
 
 
 if __name__ == "__main__":
