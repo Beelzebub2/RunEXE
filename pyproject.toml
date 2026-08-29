@@ -1,15 +1,16 @@
 [project]
 name = "runexe"
-version = "0.3.0"
-description = "Analyze and run Windows software on Linux with Wine or Proton"
+version = "0.4.3"
+description = "Analyze and run Windows software on Linux with a desktop GUI or CLI"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "LGPL-2.1-only"
 authors = [{name = "RunEXE contributors"}]
-keywords = ["wine", "windows", "linux", "pe", "executable"]
+keywords = ["wine", "proton", "windows", "linux", "pe", "gui", "executable"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
+    "Environment :: X11 Applications :: Qt",
     "Intended Audience :: End Users/Desktop",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
@@ -22,6 +23,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gui = [
+    # Qt 6.8.3 retains a manylinux_2_28 x86_64 wheel. Newer Qt branches
+    # require newer glibc, but Python 3.14 needs a newer ABI-compatible build.
+    "PySide6-Essentials>=6.8.3,<6.9; python_version < '3.14'",
+    "PySide6-Essentials>=6.10.1,<7; python_version >= '3.14'",
+]
 dev = [
     "build>=1.2",
     "pytest>=8.0",
@@ -35,12 +42,18 @@ Issues = "https://github.com/cdjuaum/runexe/issues"
 [project.scripts]
 runexe = "runexe.cli:main"
 
+[project.gui-scripts]
+runexe-gui = "runexe.gui:main"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["runexe*"]
+
+[tool.setuptools.package-data]
+runexe = ["assets/*.png"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

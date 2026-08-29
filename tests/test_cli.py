@@ -2,7 +2,7 @@ from typer.testing import CliRunner
 
 from runexe import __version__
 from runexe.cli import app
-from runexe.models import CompatibilityReport, ExecutableInfo, HostInfo
+from runexe.models import ApplicationProfile, CompatibilityReport, ExecutableInfo, HostInfo
 from runexe.runner import LaunchResult
 
 from .helpers import make_pe
@@ -72,3 +72,54 @@ def test_run_rejects_conflicting_runtime_options(tmp_path):
 
     assert result.exit_code == 1
     assert "cannot be combined" in result.output
+
+
+def test_gui_command_keeps_desktop_optional(tmp_path, monkeypatch):
+    path = tmp_path / "app.exe"
+    path.touch()
+    seen = {}
+
+    def fake_launch_gui(initial_file, qt_platform):
+        seen["file"] = initial_file
+        seen["platform"] = qt_platform
+        return 0
+
+    monkeypatch.setattr("runexe.gui.launch_gui", fake_launch_gui)
+
+    result = runner.invoke(app, ["gui", str(path)])
+
+    assert result.exit_code == 0
+    assert seen["file"] == path
+    assert seen["platform"] == "auto"
+
+
+def test_run_uses_profile_windows_version_when_not_overridden(tmp_path, monkeypatch):
+    path = tmp_path / "PaintDotNet.exe"
+    path.touch()
+    executable = ExecutableInfo(path, True, architecture="x86_64")
+    compatibility = CompatibilityReport(
+        application_type=".NET",
+        architecture="x86_64",
+        category="application",
+        backend="wine",
+        recommended_runtime="Wine",
+        wine_arch="win64",
+        profile=ApplicationProfile("paint-dot-net", "Paint.NET", recommended_windows_version="11"),
+    )
+    host = HostInfo("x86_64", True, "wine-11", True, True, True)
+    seen = {}
+
+    monkeypatch.setattr("runexe.cli.analyze_executable", lambda _: executable)
+    monkeypatch.setattr("runexe.cli.detect_host", lambda: host)
+    monkeypatch.setattr("runexe.cli.analyze_compatibility", lambda *_: compatibility)
+
+    def fake_launch(*args, **kwargs):
+        seen.update(kwargs)
+        return LaunchResult(0, "", "")
+
+    monkeypatch.setattr("runexe.cli.launch", fake_launch)
+
+    result = runner.invoke(app, ["run", str(path), "--no-deps"])
+
+    assert result.exit_code == 0
+    assert seen["winver"] == "11"

@@ -13,7 +13,9 @@ import typer
 from runexe import __version__
 from runexe.analyzer import analyze_executable
 from runexe.compatibility import analyze_compatibility
+from runexe.diagnostics import collect_diagnostics
 from runexe.host import detect_host
+from runexe.profiles import detect_runtime_issue
 from runexe.proton import ProtonError, discover_proton_installations, select_proton
 from runexe.resources import extract_requested_execution_level
 from runexe.runner import LaunchResult, RunnerError, launch
@@ -280,6 +282,11 @@ def run(
         install_dependencies = (
             dependencies if dependencies is not None else compatibility.backend == "wine"
         )
+        effective_winver = winver or (
+            compatibility.profile.recommended_windows_version
+            if compatibility.profile is not None
+            else None
+        )
 
         print_banner(f"Launch | {result.path.name}")
         plan_rows: list[tuple[str, object]] = [
@@ -300,6 +307,7 @@ def run(
             ),
             ("Dependencies", ", ".join(compatibility.required_verbs) or "none detected"),
             ("Provisioning", "enabled" if install_dependencies else "skipped"),
+            ("Windows version", effective_winver or "runtime default"),
         ]
         print_summary("Launch plan", plan_rows)
         for warning in compatibility.warnings:
@@ -324,7 +332,7 @@ def run(
             extra_args=list(ctx.args),
             timeout=timeout,
             verbose=verbose,
-            winver=winver,
+            winver=effective_winver,
             prefix=prefix,
             install_dependencies=install_dependencies,
             proton=selected_proton.script if selected_proton else proton,
@@ -345,6 +353,13 @@ def run(
         if launch_result.timed_out:
             _fail(f"Process exceeded the {timeout}-second timeout.", 124)
         if launch_result.exit_code != 0:
+            diagnostic = detect_runtime_issue(
+                f"{launch_result.stdout}\n{launch_result.stderr}",
+                launch_result.exit_code,
+                compatibility.profile,
+            )
+            if diagnostic is not None:
+                print_warning(diagnostic.message)
             code = launch_result.exit_code or 1
             _fail(
                 f"Process exited with code {launch_result.exit_code}.",
@@ -356,6 +371,74 @@ def run(
         raise
     except (OSError, ValueError, ProtonError, RunnerError) as error:
         _fail(str(error))
+
+
+@app.command()
+def gui(
+    file: Annotated[
+        Path | None,
+        typer.Argument(help="Optional EXE, AppX, or MSIX to analyze when the window opens."),
+    ] = None,
+    qt_platform: Annotated[
+        str,
+        typer.Option(
+            "--platform",
+            help="Qt backend: auto, xcb, wayland, offscreen, or minimal.",
+        ),
+    ] = "auto",
+) -> None:
+    """Open the scalable RunEXE desktop interface."""
+
+    from runexe.gui import GuiUnavailableError, launch_gui
+
+    try:
+        exit_code = launch_gui(file, qt_platform)
+    except GuiUnavailableError as error:
+        _fail(str(error))
+    raise typer.Exit(code=exit_code)
+
+
+@app.command()
+def doctor(
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit only a machine-readable diagnostic report.")
+    ] = False,
+    check_gui: Annotated[
+        bool,
+        typer.Option("--gui/--no-gui", help="Include Qt, display-server, and plugin checks."),
+    ] = True,
+) -> None:
+    """Check Linux, runtime, GUI, and package-manager readiness without changing the host."""
+
+    report = collect_diagnostics(include_gui=check_gui)
+    if json_output:
+        typer.echo(json.dumps(report.as_dict(), indent=2))
+    else:
+        print_banner("Read-only host diagnostics | no packages or prefixes will be changed")
+        print_summary(
+            "Linux host",
+            [
+                ("Distribution", report.distribution.pretty_name),
+                ("Architecture", report.architecture),
+                ("C library", report.libc),
+                ("Package manager", report.package_manager or "not detected"),
+                ("Launch ready", status_text(report.ready)),
+            ],
+        )
+        labels = {"ok": "OK", "warning": "WARNING", "error": "ERROR"}
+        print_table(
+            "Capability checks",
+            (("Status", "left"), ("Component", "left"), ("Details", "left")),
+            (
+                (labels.get(check.status, check.status.upper()), check.name, check.detail)
+                for check in report.checks
+            ),
+        )
+        for check in report.checks:
+            if check.fix:
+                print_hint(f"{check.name}: {check.fix}")
+    if not report.ready:
+        raise typer.Exit(code=1)
 
 
 @app.command(name="backends")

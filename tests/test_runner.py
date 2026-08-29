@@ -3,7 +3,15 @@ from unittest.mock import patch
 
 from runexe.models import CompatibilityReport, ExecutableInfo
 from runexe.proton import ProtonInstallation
-from runexe.runner import launch, prefix_path_for, set_windows_version
+from runexe.runner import (
+    PreparedEnvironment,
+    build_launch_spec,
+    launch,
+    open_runtime_configuration,
+    prefix_path_for,
+    prepare_environment,
+    set_windows_version,
+)
 
 
 def report(**changes):
@@ -87,3 +95,51 @@ def test_launches_with_selected_proton(select, ensure, run, tmp_path):
     assert run.call_args.kwargs["env"]["STEAM_COMPAT_DATA_PATH"] == str(
         (tmp_path / "compatdata").resolve()
     )
+
+
+@patch("runexe.runner.ensure_prefix")
+@patch("runexe.runner._require_binary", return_value="/usr/bin/wine")
+def test_prepares_wine_without_launching(require, ensure, tmp_path):
+    path = tmp_path / "app.exe"
+    path.touch()
+    prefix = tmp_path / "prefix"
+
+    prepared = prepare_environment(
+        ExecutableInfo(path, True),
+        report(),
+        prefix=prefix,
+        install_dependencies=False,
+    )
+
+    assert prepared.backend == "wine"
+    assert prepared.path == prefix.resolve()
+    assert prepared.launcher == "/usr/bin/wine"
+    ensure.assert_called_once_with(prefix.resolve(), "win64", verbose=False)
+
+
+def test_builds_launch_spec_for_gui_process(tmp_path):
+    path = tmp_path / "app.exe"
+    path.touch()
+    prepared = PreparedEnvironment("wine", tmp_path / "prefix", "Wine", "wine", "win64")
+
+    spec = build_launch_spec(ExecutableInfo(path, True), prepared, ["--portable"])
+
+    assert spec.command == ("wine", str(path.resolve()), "--portable")
+    assert spec.cwd == tmp_path
+    assert spec.env["WINEPREFIX"] == str(tmp_path / "prefix")
+
+
+@patch("runexe.runner.subprocess.Popen")
+@patch("runexe.runner._wine_tool_command", return_value=["winecfg"])
+@patch("runexe.runner.prepare_environment")
+def test_opens_configuration_for_prepared_wine(prepare, tool, popen, tmp_path):
+    path = tmp_path / "app.exe"
+    path.touch()
+    prepared = PreparedEnvironment("wine", tmp_path / "prefix", "Wine", "wine", "win64")
+    prepare.return_value = prepared
+
+    result = open_runtime_configuration(ExecutableInfo(path, True), report())
+
+    assert result == prepared
+    assert popen.call_args.args[0] == ["winecfg"]
+    assert popen.call_args.kwargs["cwd"] == tmp_path

@@ -77,6 +77,18 @@ class Dependency:
     winetricks_verb: str | None = None
 
 
+@dataclass(frozen=True)
+class ApplicationProfile:
+    """Known compatibility requirements for a detected application family."""
+
+    key: str
+    name: str
+    recommended_windows_version: str | None = None
+    minimum_windows_build: int | None = None
+    summary: str = ""
+    requirements: tuple[str, ...] = ()
+
+
 @dataclass
 class CompatibilityReport:
     application_type: str
@@ -102,6 +114,7 @@ class CompatibilityReport:
     # and the CLR header. See dependencies.py.
     required_verbs: list[str] = field(default_factory=list)
     dependencies: list[Dependency] = field(default_factory=list)
+    profile: ApplicationProfile | None = None
 
 
 @dataclass

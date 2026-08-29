@@ -19,6 +19,7 @@ from runexe.models import (
     ExecutableInfo,
     HostInfo,
 )
+from runexe.profiles import detect_application_profile
 from runexe.resources import extract_requested_execution_level
 
 
@@ -291,6 +292,11 @@ def analyze_compatibility(
     if backend_preference not in {"auto", "wine", "proton"}:
         raise ValueError(f"Unknown backend preference: {backend_preference}")
     notes = []
+    profile = detect_application_profile(executable)
+    if profile is not None:
+        notes.append(f"{profile.name} compatibility profile detected.")
+        if profile.summary:
+            notes.append(profile.summary)
 
     # Determine application architecture.
     architecture = executable.architecture or "Unknown"
@@ -585,4 +591,5 @@ def analyze_compatibility(
         notes=notes,
         dependencies=dependencies,
         required_verbs=required_verbs,
+        profile=profile,
     )
