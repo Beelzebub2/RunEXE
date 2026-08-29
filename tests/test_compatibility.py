@@ -8,6 +8,7 @@ from runexe.compatibility import (
     dotnet_version_to_verb,
 )
 from runexe.models import ExecutableInfo, HostInfo, PEImport
+from runexe.profiles import PAINT_NET, detect_runtime_issue
 
 
 def executable(tmp_path, imports=None, architecture="x86_64"):
@@ -116,3 +117,25 @@ def test_rejects_non_object_runtimeconfig(tmp_path):
     app.path.with_name("app.runtimeconfig.json").write_text("[]", encoding="utf-8")
 
     assert detect_apphost_dotnet_version(app.path) == (None, False)
+
+
+def test_detects_paint_net_and_recommends_modern_windows(tmp_path):
+    app = executable(tmp_path)
+    app.path = app.path.with_name("PaintDotNet.exe")
+    app.path.touch()
+
+    report = analyze_compatibility(app)
+
+    assert report.profile is not None
+    assert report.profile.key == "paint-dot-net"
+    assert report.profile.minimum_windows_build == 19044
+    assert report.profile.recommended_windows_version == "11"
+    assert any("21H2" in note for note in report.notes)
+
+
+def test_recognizes_paint_net_old_windows_failure():
+    diagnostic = detect_runtime_issue("", 1150 % 256, PAINT_NET)
+
+    assert diagnostic is not None
+    assert diagnostic.recommended_windows_version == "11"
+    assert "rejected the Windows version" in diagnostic.message

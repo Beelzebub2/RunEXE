@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import os
 import platform
-import shutil
 import subprocess
 from pathlib import Path
 
 from .models import ExecutableInfo, HostInfo
+from .platform_support import find_executable
 from .proton import discover_proton_installations
 
 
@@ -69,7 +69,7 @@ def detect_host(executable: ExecutableInfo | None = None) -> HostInfo:
 
     del executable
     architecture = _normalize_architecture(platform.machine())
-    wine_binary = shutil.which("wine")
+    wine_binary = find_executable("wine")
     wine_installed = wine_binary is not None
     wine_version = None
     wine_wow64: bool | None = False
@@ -99,7 +99,7 @@ def detect_host(executable: ExecutableInfo | None = None) -> HostInfo:
         wine_version=wine_version,
         wine_wow64=wine_wow64,
         wine_32bit_prefix=wine_32bit_prefix,
-        winetricks_installed=shutil.which("winetricks") is not None,
+        winetricks_installed=find_executable("winetricks") is not None,
         proton_installed=bool(proton_installations),
         proton_versions=[item.name for item in proton_installations],
     )

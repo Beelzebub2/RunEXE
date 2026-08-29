@@ -4,13 +4,13 @@ import hashlib
 import os
 import re
 import shlex
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from .models import CompatibilityReport, ExecutableInfo
 from .pe_utils import run_with_progress
+from .platform_support import find_executable, install_hint
 from .proton import (
     ProtonError,
     ProtonInstallation,
@@ -43,23 +43,40 @@ class LaunchResult:
     timed_out: bool = False
 
 
+@dataclass(frozen=True)
+class PreparedEnvironment:
+    """A ready-to-use isolated Wine prefix or Proton compat-data directory."""
+
+    backend: str
+    path: Path
+    runtime_name: str
+    launcher: str
+    wine_arch: str
+    proton_installation: ProtonInstallation | None = None
+
+
+@dataclass(frozen=True)
+class LaunchSpec:
+    """A fully resolved process invocation suitable for CLI or GUI execution."""
+
+    command: tuple[str, ...]
+    cwd: Path
+    env: dict[str, str]
+
+
 def _verbose(enabled: bool, message: str) -> None:
     if enabled:
         print(f"[runexe] {message}")
 
 
 def _require_binary(name: str) -> str:
-    path = shutil.which(name)
+    path = find_executable(name)
     if path is None:
-        hints = {
-            "wine": "sudo apt install wine (Ubuntu/Debian) or sudo dnf install wine (Fedora)",
-            "winetricks": (
-                "sudo apt install winetricks (Ubuntu/Debian) or "
-                "sudo dnf install winetricks (Fedora)"
-            ),
-        }
-        hint = hints.get(name, f"Install {name} using your package manager")
-        raise RunnerError(f"'{name}' not found. {hint}")
+        variable = f"RUNEXE_{name.upper()}_PATH"
+        raise RunnerError(
+            f"'{name}' not found. {install_hint(name)}. If it is installed outside PATH, "
+            f"set {variable} to its executable."
+        )
     return path
 
 
@@ -95,7 +112,7 @@ def _wine_env(prefix: Path, wine_arch: str) -> dict:
 def _wine_tool_command(name: str) -> list[str]:
     """Prefer Wine's native helper, with a loader fallback."""
 
-    helper = shutil.which(name)
+    helper = find_executable(name)
     if helper:
         return [helper]
     return [_require_binary("wine"), name]
@@ -382,58 +399,179 @@ def _execute_launch(
     return LaunchResult(completed.returncode, completed.stdout, completed.stderr)
 
 
-def _launch_proton(
+def _validate_environment_request(
+    executable: ExecutableInfo,
+    compatibility: CompatibilityReport,
+) -> None:
+    if compatibility.backend == "unsupported":
+        raise RunnerError(f"{compatibility.architecture} is not supported by Wine/Proton.")
+    if compatibility.backend not in {"wine", "proton"}:
+        raise RunnerError(f"Unknown compatibility backend: {compatibility.backend}")
+    if compatibility.blocking_issues:
+        raise RunnerError("Cannot prepare environment: " + "; ".join(compatibility.blocking_issues))
+    if not executable.valid:
+        raise RunnerError(executable.reason or "Invalid Windows executable.")
+    if not executable.path.exists():
+        raise RunnerError(f"Executable not found: {executable.path}")
+
+
+def prepare_environment(
     executable: ExecutableInfo,
     compatibility: CompatibilityReport,
     *,
-    selector: str | Path | None,
-    extra_args: list[str] | None,
-    timeout: int | None,
-    verbose: bool,
-    winver: str | None,
-    compat_data: Path | None,
-    install_dependencies: bool,
-) -> LaunchResult:
-    try:
-        installation = select_proton(selector)
-    except ProtonError as error:
-        raise RunnerError(str(error)) from error
+    prefix: Path | None = None,
+    install_dependencies: bool = True,
+    proton: str | Path | None = None,
+    winver: str | None = None,
+    verbose: bool = False,
+) -> PreparedEnvironment:
+    """Create and configure an isolated environment without launching the app."""
 
+    _validate_environment_request(executable, compatibility)
     executable_path = executable.path.resolve()
-    data_path = (
-        compat_data.expanduser().resolve()
-        if compat_data is not None
-        else compat_data_path_for(executable_path)
+
+    if compatibility.backend == "proton":
+        try:
+            installation = select_proton(proton)
+        except ProtonError as error:
+            raise RunnerError(str(error)) from error
+
+        data_path = (
+            prefix.expanduser().resolve()
+            if prefix is not None
+            else compat_data_path_for(executable_path)
+        )
+        if install_dependencies and compatibility.required_verbs:
+            _require_binary("winetricks")
+
+        _verbose(verbose, f"Backend: Proton ({installation.name})")
+        _verbose(verbose, f"Proton script: {installation.script}")
+        _verbose(verbose, f"Compat data: {data_path}")
+        ensure_proton_prefix(installation, data_path, executable_path, verbose)
+
+        if install_dependencies and compatibility.required_verbs:
+            try:
+                proton_wine_env = proton_winetricks_environment(installation, data_path)
+            except ProtonError as error:
+                raise RunnerError(str(error)) from error
+            install_verbs(
+                data_path / "pfx",
+                compatibility.required_verbs,
+                verbose=verbose,
+                env_override=proton_wine_env,
+            )
+        if winver is not None:
+            set_proton_windows_version(installation, data_path, executable_path, winver, verbose)
+
+        return PreparedEnvironment(
+            backend="proton",
+            path=data_path,
+            runtime_name=installation.name,
+            launcher=str(installation.script),
+            wine_arch="win64",
+            proton_installation=installation,
+        )
+
+    wine_arch = compatibility.wine_arch
+    if wine_arch is None:
+        raise RunnerError("No compatible Wine prefix architecture was found.")
+    wine_prefix = (
+        prefix.expanduser().resolve() if prefix is not None else prefix_path_for(executable)
     )
+
+    wine_binary = _require_binary("wine")
     if install_dependencies and compatibility.required_verbs:
         _require_binary("winetricks")
 
-    _verbose(verbose, f"Backend: Proton ({installation.name})")
-    _verbose(verbose, f"Proton script: {installation.script}")
-    _verbose(verbose, f"Compat data: {data_path}")
-    ensure_proton_prefix(installation, data_path, executable_path, verbose)
+    _verbose(verbose, f"Backend: Wine ({wine_binary})")
+    _verbose(verbose, f"Wine architecture: {wine_arch}")
+    _verbose(verbose, f"Wine prefix: {wine_prefix}")
+    ensure_prefix(wine_prefix, wine_arch, verbose=verbose)
 
     if install_dependencies and compatibility.required_verbs:
-        try:
-            proton_wine_env = proton_winetricks_environment(installation, data_path)
-        except ProtonError as error:
-            raise RunnerError(str(error)) from error
         install_verbs(
-            data_path / "pfx",
+            wine_prefix,
             compatibility.required_verbs,
             verbose=verbose,
-            env_override=proton_wine_env,
+            wine_arch=wine_arch,
         )
     if winver is not None:
-        set_proton_windows_version(installation, data_path, executable_path, winver, verbose)
+        set_windows_version(wine_prefix, wine_arch, winver, verbose=verbose)
 
-    command = [str(installation.script), "run", str(executable_path), *(extra_args or [])]
+    return PreparedEnvironment(
+        backend="wine",
+        path=wine_prefix,
+        runtime_name="Wine",
+        launcher=wine_binary,
+        wine_arch=wine_arch,
+    )
+
+
+def open_runtime_configuration(
+    executable: ExecutableInfo,
+    compatibility: CompatibilityReport,
+    *,
+    prefix: Path | None = None,
+    proton: str | Path | None = None,
+    verbose: bool = False,
+) -> PreparedEnvironment:
+    """Prepare an environment and open its native Wine configuration dialog."""
+
+    prepared = prepare_environment(
+        executable,
+        compatibility,
+        prefix=prefix,
+        install_dependencies=False,
+        proton=proton,
+        verbose=verbose,
+    )
+    executable_path = executable.path.resolve()
+
+    if prepared.proton_installation is not None:
+        installation = prepared.proton_installation
+        command = [str(installation.script), "runinprefix", "winecfg"]
+        env = proton_environment(installation, prepared.path, executable_path)
+    else:
+        command = _wine_tool_command("winecfg")
+        env = _wine_env(prepared.path, prepared.wine_arch)
+
+    try:
+        subprocess.Popen(command, cwd=executable_path.parent, env=env)
+    except OSError as error:
+        raise RunnerError(f"Could not open runtime configuration: {error}") from error
+    return prepared
+
+
+def build_launch_spec(
+    executable: ExecutableInfo,
+    prepared: PreparedEnvironment,
+    extra_args: list[str] | None = None,
+) -> LaunchSpec:
+    """Build the process command for a previously prepared environment."""
+
+    executable_path = executable.path.resolve()
+    if prepared.proton_installation is not None:
+        installation = prepared.proton_installation
+        command = [str(installation.script), "run", str(executable_path), *(extra_args or [])]
+        env = proton_environment(installation, prepared.path, executable_path)
+    else:
+        command = [prepared.launcher, str(executable_path), *(extra_args or [])]
+        env = _wine_env(prepared.path, prepared.wine_arch)
+
+    return LaunchSpec(tuple(command), executable_path.parent, env)
+
+
+def _launch_prepared(
+    executable: ExecutableInfo,
+    prepared: PreparedEnvironment,
+    extra_args: list[str] | None,
+    timeout: int | None,
+    verbose: bool,
+) -> LaunchResult:
+    spec = build_launch_spec(executable, prepared, extra_args)
+
     return _execute_launch(
-        command,
-        executable_path,
-        proton_environment(installation, data_path, executable_path),
-        timeout,
-        verbose,
+        list(spec.command), executable.path.resolve(), spec.env, timeout, verbose
     )
 
 
@@ -450,97 +588,16 @@ def launch(
 ) -> LaunchResult:
     """Provision an isolated Wine/Proton environment and launch the executable."""
 
-    if compatibility.backend == "unsupported":
-        raise RunnerError(f"{compatibility.architecture} is not supported by Wine/Proton.")
-
-    if compatibility.blocking_issues:
-        raise RunnerError("Refusing to auto-launch: " + "; ".join(compatibility.blocking_issues))
-
-    if not executable.path.exists():
-        raise RunnerError(f"Executable not found: {executable.path}")
-
     if timeout is not None and timeout <= 0:
         raise RunnerError("Timeout must be greater than zero seconds.")
-
-    if compatibility.backend == "proton":
-        return _launch_proton(
-            executable,
-            compatibility,
-            selector=proton,
-            extra_args=extra_args,
-            timeout=timeout,
-            verbose=verbose,
-            winver=winver,
-            compat_data=prefix,
-            install_dependencies=install_dependencies,
-        )
-
-    wine_arch = compatibility.wine_arch
-    if wine_arch is None:
-        raise RunnerError("No compatible Wine prefix architecture was found.")
-    prefix = prefix.expanduser().resolve() if prefix is not None else prefix_path_for(executable)
-
-    # Fail before making a prefix if required tools are missing.
-    wine_binary = _require_binary("wine")
-    if install_dependencies and compatibility.required_verbs:
-        _require_binary("winetricks")
-
-    _verbose(verbose, "Preparing launch...")
-    _verbose(
-        verbose,
-        f"Executable: {executable.path.resolve()}",
-    )
-    _verbose(
-        verbose,
-        f"Executable architecture: {compatibility.architecture}",
-    )
-    _verbose(
-        verbose,
-        f"Backend: {compatibility.backend}",
-    )
-    _verbose(
-        verbose,
-        f"Wine architecture: {wine_arch}",
-    )
-    _verbose(
-        verbose,
-        f"Wine prefix: {prefix}",
-    )
-
-    ensure_prefix(
-        prefix,
-        wine_arch,
+    prepared = prepare_environment(
+        executable,
+        compatibility,
+        prefix=prefix,
+        install_dependencies=install_dependencies,
+        proton=proton,
+        winver=winver,
         verbose=verbose,
     )
-
-    if install_dependencies and compatibility.required_verbs:
-        install_verbs(
-            prefix,
-            compatibility.required_verbs,
-            verbose=verbose,
-            wine_arch=wine_arch,
-        )
-
-    # Some Winetricks verbs temporarily change the reported Windows
-    # version, so apply the explicit user override after provisioning.
-    if winver is not None:
-        set_windows_version(prefix, wine_arch, winver, verbose=verbose)
-
-    executable_path = executable.path.resolve()
-    command = [
-        wine_binary,
-        str(executable_path),
-        *(extra_args or []),
-    ]
-
-    _verbose(verbose, f"Wine binary: {wine_binary}")
-
-    if timeout is not None:
-        _verbose(
-            verbose,
-            f"Launch timeout: {timeout} seconds",
-        )
-    else:
-        _verbose(verbose, "Launch timeout: none")
-
-    return _execute_launch(command, executable_path, _wine_env(prefix, wine_arch), timeout, verbose)
+    _verbose(verbose, f"Launch timeout: {timeout if timeout is not None else 'none'}")
+    return _launch_prepared(executable, prepared, extra_args, timeout, verbose)

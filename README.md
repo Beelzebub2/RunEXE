@@ -1,6 +1,7 @@
 # RunEXE
 
-Analyze Windows software and launch it on Linux through the best available Wine or Proton runtime.
+Analyze Windows software and launch it on Linux through the best available Wine or Proton runtime,
+from a scalable desktop application or the full command-line interface.
 
 <p align="center">
   <img src="assets/runexe-logo-v2.png" alt="RunEXE terminal-to-launch logo" width="360">
@@ -8,9 +9,51 @@ Analyze Windows software and launch it on Linux through the best available Wine 
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![License](https://img.shields.io/badge/license-LGPL--2.1-green) ![Status](https://img.shields.io/badge/status-alpha-orange)
 
-See the detailed [changelog](CHANGELOG.md) for the 0.3.0 release notes.
+See the detailed [changelog](CHANGELOG.md) for the latest release notes.
 
 RunEXE inspects PE executables and AppX/MSIX packages before launch, reports likely compatibility concerns, discovers installed Wine and Proton runtimes, and creates an isolated per-application environment. Games prefer Proton when it is available; ordinary applications prefer Wine, with explicit overrides for either backend.
+
+## Desktop interface
+
+<p align="center">
+  <img src="assets/runexe-gui.png" alt="RunEXE desktop overview" width="900">
+</p>
+
+The Qt desktop application is the easiest way to use RunEXE. It includes:
+
+- A responsive overview with drag-and-drop file selection and clear readiness cards
+- Background analysis and environment preparation, so the window stays responsive
+- Automatic Wine/Proton selection with manual overrides when needed
+- One-click isolated environment preparation and native Wine/Proton settings
+- Persistent runtime preferences, keyboard shortcuts, and an in-app activity log
+- Live application output without blocking the interface
+- Smooth wheel/touch scrolling, subtle page and metric transitions, and responsive action layouts
+- Compatibility presets that detect known requirements such as Paint.NET's minimum Windows build
+
+Install the optional desktop dependencies and open it with either entry point:
+
+```bash
+python -m pip install -e '.[gui]'
+runexe-gui
+# or
+runexe gui
+```
+
+Before the first launch, `runexe doctor` checks the active distribution, libc,
+package manager, Wine/Proton, graphical session, PySide6 plugins, and missing Qt
+shared libraries. It is read-only and prints copy/paste repair commands for the
+detected distribution.
+
+Open and analyze a file immediately:
+
+```bash
+runexe-gui path/to/app.exe
+# or
+runexe gui path/to/app.exe
+```
+
+The GUI is intentionally a client of the same tested analysis and runtime services as the CLI;
+it does not maintain a separate Wine or Proton implementation.
 
 ## ✅ Tested Applications
 
@@ -44,24 +87,85 @@ More compatibility data is one of the long-term goals of the project (see [Roadm
 - **Winetricks integration** - installs required runtimes (VC++ redistributables, D3D compiler/extension libs, OpenAL, .NET Framework) before launch
 - **Native Wine execution** - launches from the application directory and preserves arguments, stdout, stderr, timeouts, and exit codes
 - **Polished terminal UI** - readable launch plans, compact tables, clear status language, and a terminal mark derived from the project logo
+- **Scalable desktop GUI** - responsive Qt layouts, drag and drop, runtime configuration, live logs, persistent preferences, and background tasks
 - **Automation-friendly reports** - emits the full analysis and compatibility result as JSON
 
 ## 📋 Requirements
 
-- Linux on an x86 or x86_64 host
+- Linux on an x86 or x86_64 host (the packaged Qt GUI requires x86_64; the CLI
+  remains available on x86)
 - Python 3.10+
 - [Wine](https://www.winehq.org/), [Proton](https://github.com/ValveSoftware/Proton), or both (`analyze --no-host` needs neither)
 - [Winetricks](https://github.com/Winetricks/winetricks) (optional, but needed for automatic dependency installation)
+- [PySide6 Essentials](https://doc.qt.io/qtforpython-6/) (installed automatically with the `gui` extra)
 
 ## 🔧 Installation
 
 ```bash
 git clone https://github.com/cdjuaum/runexe.git
 cd runexe
-pip install -e .
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[gui]'
+runexe doctor
 ```
 
-This installs the `runexe` command via [Typer](https://typer.tiangolo.com/).
+For a CLI-only installation, replace `.[gui]` with `.`. The console interface
+does not import Qt and continues to work on headless hosts, SSH sessions, and
+musl distributions where an official PySide6 wheel is unavailable.
+
+### Distribution portability
+
+RunEXE does not call `apt` internally or install system packages behind your
+back. It detects `apt`, `dnf`, `pacman`, `zypper`, `apk`, `xbps-install`,
+`emerge`, `eopkg`, and NixOS, then reports an appropriate command when a
+runtime or GUI library is missing. These are typical prerequisites:
+
+| Distribution family | Runtime packages |
+| --- | --- |
+| Debian, Ubuntu, Kali, Mint | `sudo apt install wine winetricks` |
+| Fedora, RHEL derivatives | `sudo dnf install wine winetricks` |
+| Arch, Manjaro | `sudo pacman -S wine winetricks` |
+| openSUSE | `sudo zypper install wine winetricks` |
+| Alpine | `sudo apk add wine winetricks` |
+| Void | `sudo xbps-install -S wine winetricks` |
+| Gentoo | `sudo emerge --ask app-emulation/wine-vanilla app-emulation/winetricks` |
+| NixOS | `nix profile install nixpkgs#wineWowPackages.stable nixpkgs#winetricks` |
+
+On Python 3.10-3.13 the PyPI GUI extra uses Qt 6.8.3 because its x86_64 wheel
+supports glibc 2.28 and newer, covering more stable distributions than recent
+Qt wheels. Python 3.14 selects a current PySide6 build, whose official wheel
+requires newer glibc. PyPI does not publish a musllinux PySide6-Essentials
+wheel. On Alpine or another musl system, install the distribution's PySide6
+package and then install RunEXE without the `gui` extra; `runexe doctor`
+verifies the resulting Qt installation. The CLI itself is pure Python and
+works with either glibc or musl.
+
+Wayland and X11 are selected before Qt loads. Automatic mode prefers the
+current desktop session and keeps the other backend as a fallback. Override it
+only when troubleshooting:
+
+```bash
+runexe-gui --platform wayland
+runexe gui --platform xcb
+RUNEXE_SOFTWARE_RENDERING=1 runexe-gui
+```
+
+Portable, Nix, and custom runtime layouts can be supplied without modifying
+`PATH`:
+
+```bash
+RUNEXE_WINE_PATH=/path/to/wine runexe run app.exe
+RUNEXE_WINETRICKS_PATH=/path/to/winetricks runexe run app.exe
+RUNEXE_PROTON_PATH=/path/to/Proton runexe run game.exe
+```
+
+No compatibility frontend can guarantee that every Windows application works
+on every distribution: Wine/Proton versions, GPU drivers, kernel features, and
+the application itself still matter. RunEXE's portability guarantee is that
+host differences are detected and explained instead of being encoded as
+Debian-only assumptions or surfacing as unexplained Qt crashes.
 
 ## 📖 Usage
 
@@ -118,6 +222,15 @@ Inspect what is installed and the order in which Proton builds will be selected:
 runexe backends
 ```
 
+Run the complete, non-destructive host readiness check (or emit JSON for bug
+reports and automated setup):
+
+```bash
+runexe doctor
+runexe doctor --no-gui
+runexe doctor --json
+```
+
 `--backend auto` is the default. It prefers Proton for detected games and Wine
 for regular applications, then falls back to whichever runtime is available.
 `--proton` implies the Proton backend. `RUNEXE_PROTON_PATH` can point to a custom
@@ -161,6 +274,17 @@ runexe version
 - [x] Automatic Proton environment configuration
 - [x] AppX/MSIX inspection and launch support
 - [x] Rich terminal UI and coordinated project identity
+
+### v0.4.x
+
+- [x] Native Qt desktop interface
+- [x] Responsive overview, runtime setup, and activity pages
+- [x] Background analysis and environment preparation
+- [x] Automatic Wine and Proton configuration actions
+- [x] Live non-blocking application output
+- [x] Persistent desktop preferences and keyboard navigation
+- [x] Paint.NET profile with automatic modern-Windows requirement handling
+- [ ] Desktop notifications and recent-application history
 - [ ] More Windows runtime detection
 - [ ] Better DirectX dependency detection
 - [ ] GPU/Vulkan capability detection
@@ -172,7 +296,7 @@ runexe version
 
 - [ ] Launch existing Steam titles by App ID
 - [ ] More advanced compatibility scoring
-- [ ] GUI
+- [ ] Native Linux application packages and desktop-menu integration
 - [ ] Application database / community compatibility data
 
 ## 🛡️ Notes
@@ -194,7 +318,7 @@ Contributions are welcome! Feel free to open an issue or submit a Pull Request.
 Install the development tools and run the full local verification suite:
 
 ```bash
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[dev,gui]'
 ruff check .
 ruff format --check .
 pytest
