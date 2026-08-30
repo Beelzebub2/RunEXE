@@ -207,7 +207,11 @@ def analyze(
             "Compatibility",
             [
                 ("Application", compatibility.application_type),
-                ("Category", compatibility.category),
+                (
+                    "Category",
+                    f"{compatibility.category} "
+                    f"({compatibility.classification_confidence} confidence)",
+                ),
                 ("Selected runtime", compatibility.recommended_runtime),
                 ("Backend", compatibility.backend),
                 ("Prefix architecture", compatibility.wine_arch or "N/A"),

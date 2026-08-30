@@ -3,6 +3,12 @@ from pathlib import Path
 
 from runexe.constants import (
     ANTI_CHEAT_DLLS,
+    GAME_ENGINE_DATA_DIR_SUFFIX,
+    GAME_ENGINE_IDENTITY_MARKERS,
+    GAME_ENGINE_SIBLING_EXTENSIONS,
+    GAME_ENGINE_SIBLING_FILES,
+    GAME_ENGINE_UNREAL_DIRS,
+    GAME_PLATFORM_DLLS,
     GAME_SIGNAL_DLLS,
     IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR,
     STEAM_API_DLLS,
@@ -14,12 +20,13 @@ from runexe.dependencies import (
     resolve_verbs_for_dependencies,
 )
 from runexe.models import (
+    ApplicationClassification,
     CompatibilityReport,
     Dependency,
     ExecutableInfo,
     HostInfo,
 )
-from runexe.profiles import detect_application_profile
+from runexe.profiles import _identity_text, detect_application_profile
 from runexe.resources import extract_requested_execution_level
 
 
@@ -45,33 +52,153 @@ def detect_anti_cheat_warnings(executable: ExecutableInfo) -> list[str]:
     ]
 
 
-def classify_application(executable: ExecutableInfo) -> str:
-    """Classify the executable as "game" or "application" based on its
-    imports, to drive the Wine vs. Proton recommendation.
+def _engine_identity_signal(executable: ExecutableInfo) -> str | None:
+    """Return an engine name if it appears in the executable's local
+    identity metadata (filename, VS_VERSIONINFO strings).
 
-    A Steam API import is treated as a strong, standalone signal. A
-    graphics/input middleware import (Direct3D, XInput, etc.) is a
-    weaker signal and is only used when no Steam API import is
-    present, since plenty of non-game applications also touch D3D
-    (e.g. video players, CAD tools).
+    This is what catches Unreal Engine and Godot: both statically link
+    their runtime into the executable, so unlike Unity (which ships
+    UnityPlayer.dll as a separate import) they leave no import-table
+    trace at all. The engine's name showing up in ProductName/
+    CompanyName/FileDescription is the only local, read-only signal
+    available for them.
     """
 
-    if not executable.imports:
-        return "application"
+    identity = _identity_text(executable)
+    for marker, engine_name in GAME_ENGINE_IDENTITY_MARKERS.items():
+        if marker in identity:
+            return engine_name
+    return None
 
-    imported_names = {imported.name.lower() for imported in executable.imports}
 
-    if imported_names & STEAM_API_DLLS:
-        return "game"
+def _engine_data_marker(executable_path: Path) -> str | None:
+    """Return an engine name if a sibling file/directory next to the
+    executable is that engine's known asset/data marker.
 
-    # UnityPlayer is an engine runtime and is a strong signal on its own.
-    # Generic D3D/XInput imports are also used by browsers, CAD tools and
-    # media applications, so require at least two independent weak signals.
+    These are the most resistant signal to a packed or obfuscated
+    executable, since they're independent files on disk rather than
+    something parsed out of the PE image. Best-effort: returns None if
+    the directory can't be listed for any reason.
+    """
+
+    try:
+        siblings = list(executable_path.parent.iterdir())
+    except OSError:
+        return None
+
+    entries_by_name = {item.name.lower(): item for item in siblings}
+
+    unity_data_dir = f"{executable_path.stem.lower()}{GAME_ENGINE_DATA_DIR_SUFFIX}"
+    unity_match = entries_by_name.get(unity_data_dir)
+    if unity_match is not None and unity_match.is_dir():
+        return "Unity"
+
+    if GAME_ENGINE_UNREAL_DIRS <= entries_by_name.keys() and all(
+        entries_by_name[name].is_dir() for name in GAME_ENGINE_UNREAL_DIRS
+    ):
+        return "Unreal Engine"
+
+    for item in siblings:
+        if not item.is_file():
+            continue
+
+        engine = GAME_ENGINE_SIBLING_FILES.get(item.name.lower())
+        if engine is not None:
+            return engine
+
+        engine = GAME_ENGINE_SIBLING_EXTENSIONS.get(item.suffix.lower())
+        if engine is not None:
+            return engine
+
+    return None
+
+
+def classify_application(executable: ExecutableInfo) -> ApplicationClassification:
+    """Classify the executable as "game" or "application", to drive the
+    Wine vs. Proton recommendation.
+
+    Signals are layered from most to least specific, and the first one
+    that fires wins:
+
+    1. A Steam API or other game-distribution SDK import (Epic Online
+       Services, GOG Galaxy) -- strong, standalone.
+    2. A known engine name in local identity metadata (filename or
+       VS_VERSIONINFO strings) -- strong, standalone. Catches
+       statically-linked engines (Unreal Engine, Godot, GameMaker)
+       that never show up as a separate PE import.
+    3. A known engine's on-disk data marker next to the executable
+       (Unity's "<name>_Data" folder, Unreal's Engine+Content folders,
+       GameMaker's data.win, Godot's .pck) -- strong, standalone, and
+       the most resistant to a packed/obfuscated executable since it
+       doesn't require parsing the binary at all.
+    4. UnityPlayer.dll -- strong, standalone import-table signal.
+    5. Generic graphics/input/audio/physics middleware imports (D3D,
+       XInput, FMOD, PhysX, etc.) -- individually weak, since plenty of
+       non-game applications also touch these (video players, CAD
+       tools, DAWs); two or more together are treated as a combined,
+       medium-confidence signal.
+
+    Falls back to "application" at medium confidence when nothing
+    above fires. There is no low-confidence "game" verdict -- a signal
+    too weak to stand alone or combine with another simply isn't used.
+    """
+
+    imported_names = (
+        {imported.name.lower() for imported in executable.imports} if executable.imports else set()
+    )
+
+    steam_matches = imported_names & STEAM_API_DLLS
+    if steam_matches:
+        return ApplicationClassification(
+            category="game",
+            confidence="high",
+            signals=[f"Steam API import ({', '.join(sorted(steam_matches))})"],
+        )
+
+    for dll_name, platform_name in GAME_PLATFORM_DLLS.items():
+        if dll_name in imported_names:
+            return ApplicationClassification(
+                category="game",
+                confidence="high",
+                signals=[f"{platform_name} import ({dll_name})"],
+            )
+
+    identity_engine = _engine_identity_signal(executable)
+    if identity_engine is not None:
+        return ApplicationClassification(
+            category="game",
+            confidence="high",
+            signals=[f"{identity_engine} identified in file metadata"],
+        )
+
+    data_marker_engine = _engine_data_marker(executable.path)
+    if data_marker_engine is not None:
+        return ApplicationClassification(
+            category="game",
+            confidence="high",
+            signals=[f"{data_marker_engine} data files found alongside the executable"],
+        )
+
     game_signals = imported_names & GAME_SIGNAL_DLLS
-    if "unityplayer.dll" in game_signals or len(game_signals) >= 2:
-        return "game"
 
-    return "application"
+    if "unityplayer.dll" in game_signals:
+        return ApplicationClassification(
+            category="game",
+            confidence="high",
+            signals=["Unity engine import (UnityPlayer.dll)"],
+        )
+
+    if len(game_signals) >= 2:
+        return ApplicationClassification(
+            category="game",
+            confidence="medium",
+            signals=[
+                "Combined graphics/input/audio middleware imports "
+                f"({', '.join(sorted(game_signals))})"
+            ],
+        )
+
+    return ApplicationClassification(category="application", confidence="medium", signals=[])
 
 
 def _find_runtimeconfig(executable_path: Path) -> Path | None:
@@ -385,7 +512,14 @@ def analyze_compatibility(
     # Classify as game vs. application
     # ---------------------------------------------------------
 
-    category = classify_application(executable)
+    classification = classify_application(executable)
+    category = classification.category
+
+    if classification.signals:
+        notes.append(
+            f"Classified as {category} ({classification.confidence} confidence): "
+            + "; ".join(classification.signals)
+        )
 
     wine_available = host is None or host.wine_installed
     proton_available = host is None or host.proton_installed
@@ -594,4 +728,6 @@ def analyze_compatibility(
         dependencies=dependencies,
         required_verbs=required_verbs,
         profile=profile,
+        classification_confidence=classification.confidence,
+        classification_signals=classification.signals,
     )
