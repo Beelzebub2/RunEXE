@@ -31,6 +31,18 @@ WINE_ARCH_BY_ARCHITECTURE = {
     "x86_64": "win64",
 }
 
+# Direct3D dependency names (see dependencies.py) that DXVK/VKD3D-Proton
+# translate through Vulkan. Direct3D 9 Extensions (d3dx9) is deliberately
+# excluded: it is a helper library, not the graphics API entry point
+# itself, and importing it alone doesn't mean the app renders with D3D.
+DIRECT3D_VULKAN_APIS = {
+    "Direct3D 9",
+    "Direct3D 10",
+    "Direct3D 10.1",
+    "Direct3D 11",
+    "Direct3D 12",
+}
+
 # Anti-cheat DLLs that are identifiable by name in the import table.
 # Presence is a compatibility warning, not a blocker: EAC and BattlEye
 # support is enabled by publishers on a per-title basis for Proton.

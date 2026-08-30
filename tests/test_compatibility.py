@@ -176,6 +176,62 @@ def test_game_uses_available_wine_backend_and_recommends_proton(tmp_path):
     assert report.recommended_runtime == "Proton Experimental"
 
 
+def test_warns_when_direct3d_app_has_no_hardware_vulkan_driver(tmp_path):
+    app = executable(tmp_path, [PEImport("d3d11.dll")])
+    host = HostInfo("x86_64", True, "wine-10", True, True, True, vulkan_supported=False)
+
+    report = analyze_compatibility(app, host)
+
+    assert any("Vulkan" in warning for warning in report.warnings)
+
+
+def test_no_vulkan_warning_when_hardware_driver_is_present(tmp_path):
+    app = executable(tmp_path, [PEImport("d3d11.dll")])
+    host = HostInfo(
+        "x86_64",
+        True,
+        "wine-10",
+        True,
+        True,
+        True,
+        vulkan_supported=True,
+        gpu_vendors=["amd"],
+    )
+
+    report = analyze_compatibility(app, host)
+
+    assert not any("Vulkan" in warning for warning in report.warnings)
+
+
+def test_no_vulkan_warning_for_apps_without_direct3d_on_wine_backend(tmp_path):
+    app = executable(tmp_path, [])
+    host = HostInfo("x86_64", True, "wine-10", True, True, True, vulkan_supported=False)
+
+    report = analyze_compatibility(app, host)
+
+    assert not any("Vulkan" in warning for warning in report.warnings)
+
+
+def test_proton_backend_always_warns_without_vulkan_even_without_d3d_import(tmp_path):
+    app = executable(tmp_path, [PEImport("steam_api64.dll")])
+    host = HostInfo(
+        "x86_64",
+        True,
+        "wine-10",
+        True,
+        True,
+        True,
+        proton_installed=True,
+        proton_versions=["Proton Experimental"],
+        vulkan_supported=False,
+    )
+
+    report = analyze_compatibility(app, host)
+
+    assert report.backend == "proton"
+    assert any("Vulkan" in warning for warning in report.warnings)
+
+
 def test_report_surfaces_classification_confidence_and_signals(tmp_path):
     app = executable(tmp_path, [PEImport("steam_api64.dll")])
 

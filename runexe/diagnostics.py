@@ -11,6 +11,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .gpu import detect_gpu
 from .platform_support import (
     LinuxDistribution,
     detect_libc,
@@ -191,6 +192,38 @@ def collect_diagnostics(include_gui: bool = True) -> DoctorReport:
             None if winetricks else install_hint("winetricks", distribution),
         )
     )
+
+    gpu = detect_gpu()
+    vendor_label = ", ".join(gpu.gpu_vendors) if gpu.gpu_vendors else "no GPU vendor identified"
+    if gpu.vulkan_supported:
+        checks.append(DiagnosticCheck("Vulkan", "ok", f"hardware driver detected ({vendor_label})"))
+    elif gpu.hardware_vulkan_icds and not gpu.vulkan_loader_installed:
+        checks.append(
+            DiagnosticCheck(
+                "Vulkan",
+                "warning",
+                f"driver manifest found ({vendor_label}) but the Vulkan loader is missing",
+                install_hint("vulkan", distribution),
+            )
+        )
+    elif gpu.vulkan_icds:
+        checks.append(
+            DiagnosticCheck(
+                "Vulkan",
+                "warning",
+                "only a software renderer (lavapipe/llvmpipe) is installed",
+                install_hint("vulkan", distribution),
+            )
+        )
+    else:
+        checks.append(
+            DiagnosticCheck(
+                "Vulkan",
+                "warning",
+                "not detected; DXVK/VKD3D-Proton titles may run in software or fail to start",
+                install_hint("vulkan", distribution),
+            )
+        )
 
     if include_gui:
         display = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")

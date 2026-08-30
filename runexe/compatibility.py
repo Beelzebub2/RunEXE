@@ -3,6 +3,7 @@ from pathlib import Path
 
 from runexe.constants import (
     ANTI_CHEAT_DLLS,
+    DIRECT3D_VULKAN_APIS,
     GAME_ENGINE_DATA_DIR_SUFFIX,
     GAME_ENGINE_IDENTITY_MARKERS,
     GAME_ENGINE_SIBLING_EXTENSIONS,
@@ -634,6 +635,18 @@ def analyze_compatibility(
     # ---------------------------------------------------------
 
     dependencies = detect_dependencies(executable.imports or [])
+
+    # DXVK and VKD3D-Proton translate Direct3D 9-12 through Vulkan, and
+    # Proton always relies on them, so a missing hardware Vulkan driver is
+    # worth surfacing even though RunEXE does not install one itself.
+    direct3d_imports = {dep.name for dep in dependencies if dep.category == "graphics"}
+    needs_vulkan = backend == "proton" or bool(direct3d_imports & DIRECT3D_VULKAN_APIS)
+    if needs_vulkan and host is not None and not host.vulkan_supported:
+        warnings.append(
+            "No hardware Vulkan driver was detected. DXVK/VKD3D-Proton need one to "
+            "translate Direct3D, so this application may fall back to software "
+            "rendering or fail to start."
+        )
 
     # .NET is detected structurally through the CLR Runtime Header,
     # rather than through an imported DLL.

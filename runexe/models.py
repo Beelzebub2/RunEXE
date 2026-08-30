@@ -155,3 +155,7 @@ class HostInfo:
     winetricks_installed: bool
     proton_installed: bool = False
     proton_versions: list[str] = field(default_factory=list)
+    # True when a hardware-backed Vulkan driver is loadable, which DXVK
+    # and VKD3D-Proton require to translate Direct3D. See gpu.py.
+    vulkan_supported: bool = False
+    gpu_vendors: list[str] = field(default_factory=list)

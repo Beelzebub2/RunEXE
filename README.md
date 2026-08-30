@@ -321,10 +321,8 @@ runexe version
 - [x] Recent-application history and per-app launch presets
 - [ ] More Windows runtime detection
 - [ ] Better DirectX dependency detection
-- [ ] GPU/Vulkan capability detection
-- [ ] DXVK detection
+- [x] GPU/Vulkan capability detection
 - [x] More robust application classification
-- [ ] Improved Wine configuration
 
 ### v0.5.x
 
@@ -337,6 +335,8 @@ runexe version
 - [ ] Optional Proton runtime tuning presets for advanced troubleshooting
 - [ ] Prefix backup and restore before destructive maintenance
 - [ ] Vulkan/GPU readiness reporting for DirectX translation
+- [ ] Improved Wine configuration
+- [ ] DXVK detection
 
 ### Future
 
