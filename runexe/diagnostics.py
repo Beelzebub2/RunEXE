@@ -11,6 +11,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .graphics import probe_vulkan
 from .platform_support import (
     LinuxDistribution,
     detect_libc,
@@ -191,6 +192,30 @@ def collect_diagnostics(include_gui: bool = True) -> DoctorReport:
             None if winetricks else install_hint("winetricks", distribution),
         )
     )
+
+    vulkan = probe_vulkan()
+    if vulkan.available:
+        devices = ", ".join(vulkan.devices) or "a Vulkan-capable device"
+        version = f"; Vulkan {vulkan.version}" if vulkan.version else ""
+        checks.append(DiagnosticCheck("Vulkan/GPU", "ok", f"{devices}{version}"))
+    elif vulkan.available is False:
+        checks.append(
+            DiagnosticCheck(
+                "Vulkan/GPU",
+                "warning",
+                vulkan.error or "Vulkan initialization failed",
+                "Check the GPU driver and 32/64-bit Vulkan ICD packages.",
+            )
+        )
+    else:
+        checks.append(
+            DiagnosticCheck(
+                "Vulkan/GPU",
+                "warning",
+                "readiness unknown because vulkaninfo is unavailable",
+                install_hint("vulkan", distribution),
+            )
+        )
 
     if include_gui:
         display = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")

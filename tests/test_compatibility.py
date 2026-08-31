@@ -50,6 +50,17 @@ def test_game_uses_available_wine_backend_and_recommends_proton(tmp_path):
     assert report.recommended_runtime == "Proton Experimental"
 
 
+def test_direct3d_reports_vulkan_problem_without_blocking_wined3d_fallback(tmp_path):
+    app = executable(tmp_path, [PEImport("d3d11.dll")])
+    host = HostInfo("x86_64", True, "wine-11", True, True, True, vulkan_available=False)
+
+    report = analyze_compatibility(app, host)
+
+    assert report.graphics is not None
+    assert report.graphics.translators == ("DXVK",)
+    assert any("WineD3D" in warning for warning in report.warnings)
+
+
 def test_anti_cheat_is_a_warning_not_a_hard_blocker(tmp_path):
     app = executable(tmp_path, [PEImport("EasyAntiCheat_x64.dll")])
 

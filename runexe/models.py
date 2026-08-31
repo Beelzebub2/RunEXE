@@ -78,6 +78,16 @@ class Dependency:
 
 
 @dataclass(frozen=True)
+class GraphicsRequirements:
+    """Graphics APIs inferred from PE imports and their likely translators."""
+
+    apis: tuple[str, ...] = ()
+    translators: tuple[str, ...] = ()
+    vulkan_recommended: bool = False
+    vulkan_required: bool = False
+
+
+@dataclass(frozen=True)
 class ApplicationProfile:
     """Known compatibility requirements for a detected application family."""
 
@@ -115,6 +125,7 @@ class CompatibilityReport:
     required_verbs: list[str] = field(default_factory=list)
     dependencies: list[Dependency] = field(default_factory=list)
     profile: ApplicationProfile | None = None
+    graphics: GraphicsRequirements | None = None
 
 
 @dataclass
@@ -129,3 +140,8 @@ class HostInfo:
     winetricks_installed: bool
     proton_installed: bool = False
     proton_versions: list[str] = field(default_factory=list)
+    # None means vulkaninfo is unavailable and readiness is unknown.
+    vulkan_available: bool | None = None
+    vulkan_version: str | None = None
+    vulkan_devices: list[str] = field(default_factory=list)
+    vulkan_error: str | None = None
