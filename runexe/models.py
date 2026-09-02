@@ -88,6 +88,25 @@ class GraphicsRequirements:
 
 
 @dataclass(frozen=True)
+class ApplicationClassification:
+    """Result of classify_application(): the game/application verdict
+    plus enough detail to see why it was reached.
+
+    `confidence` is "high" when a single signal is specific enough to
+    stand on its own (Steam API, a known engine/platform SDK, an
+    on-disk engine data marker) and "medium" when the verdict rests on
+    multiple weaker signals combined. There is no "low"-confidence
+    "game" result -- a signal too weak to combine with another one
+    isn't used at all, so uncertain cases fall back to "application"
+    with confidence "medium" instead of guessing.
+    """
+
+    category: str
+    confidence: str
+    signals: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class ApplicationProfile:
     """Known compatibility requirements for a detected application family."""
 
@@ -126,6 +145,13 @@ class CompatibilityReport:
     dependencies: list[Dependency] = field(default_factory=list)
     profile: ApplicationProfile | None = None
     graphics: GraphicsRequirements | None = None
+    # "high" or "medium" -- see ApplicationClassification. Defaults to
+    # "medium" for reports built without going through
+    # classify_application (e.g. hand-built test fixtures).
+    classification_confidence: str = "medium"
+    # Human-readable reasons behind `category`, e.g. "Steam API import
+    # (steam_api64.dll)". Empty when category was set some other way.
+    classification_signals: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -145,3 +171,7 @@ class HostInfo:
     vulkan_version: str | None = None
     vulkan_devices: list[str] = field(default_factory=list)
     vulkan_error: str | None = None
+    # True when a hardware-backed Vulkan driver is loadable, which DXVK
+    # and VKD3D-Proton require to translate Direct3D. See gpu.py.
+    vulkan_supported: bool = False
+    gpu_vendors: list[str] = field(default_factory=list)

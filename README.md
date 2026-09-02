@@ -391,14 +391,13 @@ runexe version
 - [x] Automatic Wine and Proton configuration actions
 - [x] Live non-blocking application output
 - [x] Persistent desktop preferences and keyboard navigation
-- [x] Paint.NET profile with automatic modern-Windows requirement handling
 - [ ] Desktop notifications
 - [x] Recent-application history and per-app launch presets
 - [x] More Windows runtime detection
 - [x] Better DirectX dependency detection
 - [x] GPU/Vulkan capability detection
 - [x] DXVK detection
-- [ ] More robust application classification
+- [x] More robust application classification
 - [x] Improved Wine configuration
 
 ### v0.5.x

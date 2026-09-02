@@ -47,6 +47,45 @@ All notable RunEXE changes are documented here.
 - All 91 tests pass in the Debian Qt environment; the 85-test headless suite
   passes independently on both Debian/glibc and Alpine/musl.
 
+## [0.5.1] - 2026-08-30
+
+### Added
+
+- Application classification now detects Epic Online Services and GOG
+  Galaxy imports, engine names in file metadata (Unreal Engine, Godot,
+  GameMaker), and on-disk engine data markers (Unity's `_Data` folder,
+  Unreal's `Engine`/`Content` pair, GameMaker's `data.win`, Godot's
+  `.pck`) in addition to the existing Steam API and UnityPlayer.dll
+  checks.
+- Compatibility reports now include a classification confidence level
+  and the specific signals behind a "game"/"application" verdict,
+  surfaced in both the CLI output and `--json` reports.
+- Read-only GPU and Vulkan capability detection (`runexe/gpu.py`): DRM
+  render-node enumeration with PCI vendor and kernel driver identification,
+  Vulkan ICD manifest discovery (respecting `VK_DRIVER_FILES`/
+  `VK_ICD_FILENAMES`), and Vulkan loader detection, all without querying
+  the GPU or creating a Wine prefix.
+- `runexe doctor` reports a "Vulkan" capability check with a distro-specific
+  install hint, and `runexe backends` shows Vulkan availability and detected
+  GPU vendor(s) alongside Wine/Proton.
+- `HostInfo.vulkan_supported` and `HostInfo.gpu_vendors`, populated by
+  `detect_host()`, and a compatibility warning when a Direct3D 9-12
+  application or Proton launch is detected without a hardware Vulkan
+  driver, since DXVK and VKD3D-Proton require one.
+- `vulkan` package hints for every supported package-manager family
+  (apt, dnf, pacman, zypper, apk, xbps-install, emerge, eopkg) and NixOS.
+
+### Changed
+
+- `classify_application()` returns an `ApplicationClassification`
+  (category, confidence, signals) instead of a bare string. This is a
+  breaking change for any code calling it directly.
+
+### Verification
+
+- 15 new automated tests cover each classification signal path,
+  including a negative case for an ambiguous single folder name.
+
 ## [0.5.0] - 2026-08-29
 
 ### Added

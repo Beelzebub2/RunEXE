@@ -235,7 +235,11 @@ def analyze(
             "Compatibility",
             [
                 ("Application", compatibility.application_type),
-                ("Category", compatibility.category),
+                (
+                    "Category",
+                    f"{compatibility.category} "
+                    f"({compatibility.classification_confidence} confidence)",
+                ),
                 ("Selected runtime", compatibility.recommended_runtime),
                 ("Backend", compatibility.backend),
                 ("Prefix architecture", compatibility.wine_arch or "N/A"),
@@ -984,6 +988,11 @@ def list_backends() -> None:
             ("Wine version", host.wine_version or "not detected"),
             ("Winetricks", status_text(host.winetricks_installed)),
             ("Proton", status_text(bool(installations))),
+            ("Vulkan", status_text(host.vulkan_supported)),
+            (
+                "GPU vendor(s)",
+                ", ".join(host.gpu_vendors) if host.gpu_vendors else "not detected",
+            ),
         ],
     )
     if installations:
@@ -997,6 +1006,11 @@ def list_backends() -> None:
         print_hint(
             "Install Proton through Steam, add a custom build to compatibilitytools.d, "
             "or set RUNEXE_PROTON_PATH."
+        )
+    if not host.vulkan_supported:
+        print_hint(
+            "No hardware Vulkan driver detected; run 'runexe doctor' for a "
+            "distro-specific install command."
         )
 
 

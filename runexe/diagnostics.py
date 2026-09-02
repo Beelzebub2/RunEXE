@@ -11,6 +11,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .gpu import detect_gpu
 from .graphics import probe_vulkan
 from .platform_support import (
     LinuxDistribution,
@@ -193,26 +194,43 @@ def collect_diagnostics(include_gui: bool = True) -> DoctorReport:
         )
     )
 
+    gpu = detect_gpu()
     vulkan = probe_vulkan()
-    if vulkan.available:
-        devices = ", ".join(vulkan.devices) or "a Vulkan-capable device"
-        version = f"; Vulkan {vulkan.version}" if vulkan.version else ""
-        checks.append(DiagnosticCheck("Vulkan/GPU", "ok", f"{devices}{version}"))
-    elif vulkan.available is False:
+    vendor_label = ", ".join(gpu.gpu_vendors) if gpu.gpu_vendors else "no GPU vendor identified"
+    if gpu.vulkan_supported:
+        detail = f"hardware driver detected ({vendor_label})"
+        if vulkan.available:
+            devices = ", ".join(vulkan.devices)
+            version = f"; Vulkan {vulkan.version}" if vulkan.version else ""
+            if devices:
+                detail += f"; {devices}{version}"
+        checks.append(DiagnosticCheck("Vulkan", "ok", detail))
+    elif gpu.hardware_vulkan_icds and not gpu.vulkan_loader_installed:
         checks.append(
             DiagnosticCheck(
-                "Vulkan/GPU",
+                "Vulkan",
                 "warning",
-                vulkan.error or "Vulkan initialization failed",
-                "Check the GPU driver and 32/64-bit Vulkan ICD packages.",
+                f"driver manifest found ({vendor_label}) but the Vulkan loader is missing",
+                install_hint("vulkan", distribution),
+            )
+        )
+    elif gpu.vulkan_icds:
+        checks.append(
+            DiagnosticCheck(
+                "Vulkan",
+                "warning",
+                "only a software renderer (lavapipe/llvmpipe) is installed",
+                install_hint("vulkan", distribution),
             )
         )
     else:
         checks.append(
             DiagnosticCheck(
-                "Vulkan/GPU",
+                "Vulkan",
                 "warning",
-                "readiness unknown because vulkaninfo is unavailable",
+                vulkan.error
+                if vulkan.available is False
+                else "not detected; DXVK/VKD3D-Proton titles may run in software or fail to start",
                 install_hint("vulkan", distribution),
             )
         )
